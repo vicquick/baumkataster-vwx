@@ -47,7 +47,7 @@ output_crs = output_crs_label.split(" — ")[0]
 # ============================================================================
 # TOP-LEVEL TABS
 # ============================================================================
-mode_wfs, mode_pdf = st.tabs(["City WFS / REST", "PDF Baumgutachten"])
+mode_wfs, mode_pdf, mode_join = st.tabs(["City WFS / REST", "PDF Baumgutachten", "Label → Point Join"])
 
 # ============================================================================
 # MODE 1: City WFS / REST
@@ -488,4 +488,151 @@ with mode_pdf:
                     file_name="Baumkataster_VW_Import.txt",
                     mime="text/plain",
                     key="pdf_download",
+                )
+
+
+# ============================================================================
+# MODE 3: Label → Point Nearest Join
+# ============================================================================
+with mode_join:
+    st.header("Label → Point Nearest Join")
+    st.caption(
+        "Upload two SHPs: **tree points** (Baumstämme) and **label points** "
+        "(text annotations with Baum-ID). Each point gets the ID of its nearest label. "
+        "Download the result as a new SHP ready for the PDF pipeline."
+    )
+
+    col_pts, col_lbl = st.columns(2)
+
+    def _load_shp(uploaders, key_prefix):
+        """Load SHP from uploaded files."""
+        if not uploaders:
+            return None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            for uf in uploaders:
+                if uf.name.endswith(".zip"):
+                    with zipfile.ZipFile(io.BytesIO(uf.read())) as zf:
+                        zf.extractall(tmppath)
+                else:
+                    (tmppath / uf.name).write_bytes(uf.read())
+            found = list(tmppath.glob("**/*.shp"))
+            if found:
+                gdf = gpd.read_file(found[0])
+                if input_crs_override:
+                    gdf = gdf.set_crs(resolve_crs(input_crs_override), allow_override=True)
+                return gdf
+        return None
+
+    with col_pts:
+        st.subheader("Tree Points")
+        pts_files = st.file_uploader(
+            "Baumstämme point SHP",
+            type=["shp", "shx", "dbf", "prj", "cpg", "zip"],
+            accept_multiple_files=True,
+            key="join_pts_upload",
+        )
+        pts_gdf = _load_shp(pts_files, "pts")
+        if pts_gdf is not None:
+            st.success(f"**{len(pts_gdf)} points**, CRS: {pts_gdf.crs}")
+            st.dataframe(pts_gdf.drop(columns="geometry").head(5), use_container_width=True)
+
+    with col_lbl:
+        st.subheader("Label Points")
+        lbl_files = st.file_uploader(
+            "Label/text point SHP",
+            type=["shp", "shx", "dbf", "prj", "cpg", "zip"],
+            accept_multiple_files=True,
+            key="join_lbl_upload",
+        )
+        lbl_gdf = _load_shp(lbl_files, "lbl")
+        if lbl_gdf is not None:
+            st.success(f"**{len(lbl_gdf)} labels**, CRS: {lbl_gdf.crs}")
+            st.dataframe(lbl_gdf.drop(columns="geometry").head(5), use_container_width=True)
+
+    if pts_gdf is not None and lbl_gdf is not None:
+        # Pick which label field contains the Baum-ID text
+        lbl_cols = [c for c in lbl_gdf.columns if c != "geometry"]
+        lbl_id_field = st.selectbox("Label field containing Baum-ID text", lbl_cols, key="join_lbl_field")
+
+        max_dist = st.number_input(
+            "Max match distance (m)", value=10.0, min_value=0.1, max_value=100.0, step=1.0,
+            help="Labels farther than this from any point are flagged as unmatched.",
+        )
+
+        if st.button("Run Nearest Join", key="join_btn"):
+            with st.spinner("Joining..."):
+                # Project to a metric CRS for distance calculation
+                # Use UTM zone based on centroid
+                centroid = pts_gdf.to_crs("EPSG:4326").union_all().centroid
+                utm_zone = int((centroid.x + 180) / 6) + 1
+                hemisphere = "north" if centroid.y >= 0 else "south"
+                utm_epsg = 32600 + utm_zone if hemisphere == "north" else 32700 + utm_zone
+                metric_crs = f"EPSG:{utm_epsg}"
+
+                pts_m = pts_gdf.to_crs(metric_crs).copy()
+                lbl_m = lbl_gdf.to_crs(metric_crs).copy()
+
+                # sjoin_nearest
+                joined = gpd.sjoin_nearest(
+                    pts_m, lbl_m[[lbl_id_field, "geometry"]],
+                    how="left", max_distance=max_dist, distance_col="dist_m",
+                )
+
+                # Add the ID to the original points
+                result = pts_gdf.copy()
+                result["baum_id"] = joined[lbl_id_field].values
+                result["match_dist_m"] = joined["dist_m"].values
+
+                matched = result["baum_id"].notna().sum()
+                unmatched = result["baum_id"].isna().sum()
+
+                col_r1, col_r2 = st.columns(2)
+                col_r1.metric("Matched", int(matched))
+                col_r2.metric("Unmatched", int(unmatched))
+
+                st.session_state["join_result"] = result
+
+        if "join_result" in st.session_state:
+            result = st.session_state["join_result"]
+
+            st.dataframe(
+                result.drop(columns="geometry"),
+                use_container_width=True,
+            )
+
+            # Map
+            result_4326 = result.to_crs("EPSG:4326")
+            centroid = result_4326.union_all().centroid
+            m_join = folium.Map(location=[centroid.y, centroid.x], zoom_start=17)
+            for _, row in result_4326.iterrows():
+                bid = row.get("baum_id", "")
+                color = "green" if pd.notna(bid) and bid else "red"
+                label = str(bid) if pd.notna(bid) else "?"
+                dist = row.get("match_dist_m", 0)
+                folium.CircleMarker(
+                    location=[row.geometry.y, row.geometry.x],
+                    radius=5, color=color, fill=True,
+                    fill_color=color, fill_opacity=0.7,
+                    popup=folium.Popup(f"<b>{label}</b><br>dist: {dist:.1f} m", max_width=200),
+                ).add_to(m_join)
+            st_folium(m_join, width=700, height=500, key="join_map")
+
+            # Download as SHP (zip)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                out_path = Path(tmpdir) / "trees_with_ids"
+                result.to_file(out_path, driver="ESRI Shapefile")
+                # Zip all shapefile components
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in out_path.parent.glob("trees_with_ids.*"):
+                        zf.write(f, f.name)
+                zip_buffer.seek(0)
+
+                st.download_button(
+                    label="Download SHP (with Baum-IDs)",
+                    data=zip_buffer.getvalue(),
+                    file_name="trees_with_ids.zip",
+                    mime="application/zip",
+                    key="join_download",
                 )
