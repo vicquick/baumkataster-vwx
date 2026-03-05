@@ -497,9 +497,9 @@ with mode_pdf:
 with mode_join:
     st.header("Label → Point Nearest Join")
     st.caption(
-        "Upload two SHPs: **tree points** (Baumstämme) and **label points** "
-        "(text annotations with Baum-ID). Each point gets the ID of its nearest label. "
-        "Download the result as a new SHP ready for the PDF pipeline."
+        "Upload **tree points** (SHP) and **labels** (DXF or SHP). "
+        "Each point gets the ID of its nearest label text. "
+        "Download the result as a SHP ready for the PDF pipeline."
     )
 
     col_pts, col_lbl = st.columns(2)
@@ -524,6 +524,40 @@ with mode_join:
                 return gdf
         return None
 
+    def _load_dxf_texts(dxf_file) -> gpd.GeoDataFrame:
+        """Extract TEXT and MTEXT entities from a DXF as a point GeoDataFrame."""
+        import ezdxf
+        from shapely.geometry import Point as ShapelyPoint
+
+        with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tmp:
+            tmp.write(dxf_file.read())
+            tmp_path = tmp.name
+
+        doc = ezdxf.readfile(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
+
+        records = []
+        msp = doc.modelspace()
+        for entity in msp:
+            if entity.dxftype() == "TEXT":
+                ins = entity.dxf.insert
+                records.append({
+                    "text": entity.dxf.text.strip(),
+                    "layer": entity.dxf.layer,
+                    "geometry": ShapelyPoint(ins.x, ins.y),
+                })
+            elif entity.dxftype() == "MTEXT":
+                ins = entity.dxf.insert
+                records.append({
+                    "text": entity.text.strip(),
+                    "layer": entity.dxf.layer,
+                    "geometry": ShapelyPoint(ins.x, ins.y),
+                })
+
+        if not records:
+            return gpd.GeoDataFrame()
+        return gpd.GeoDataFrame(records)
+
     with col_pts:
         st.subheader("Tree Points")
         pts_files = st.file_uploader(
@@ -538,22 +572,46 @@ with mode_join:
             st.dataframe(pts_gdf.drop(columns="geometry").head(5), use_container_width=True)
 
     with col_lbl:
-        st.subheader("Label Points")
+        st.subheader("Labels (DXF or SHP)")
         lbl_files = st.file_uploader(
-            "Label/text point SHP",
-            type=["shp", "shx", "dbf", "prj", "cpg", "zip"],
+            "Label text DXF or SHP",
+            type=["dxf", "shp", "shx", "dbf", "prj", "cpg", "zip"],
             accept_multiple_files=True,
             key="join_lbl_upload",
         )
-        lbl_gdf = _load_shp(lbl_files, "lbl")
-        if lbl_gdf is not None:
-            st.success(f"**{len(lbl_gdf)} labels**, CRS: {lbl_gdf.crs}")
-            st.dataframe(lbl_gdf.drop(columns="geometry").head(5), use_container_width=True)
 
-    if pts_gdf is not None and lbl_gdf is not None:
+        lbl_gdf = None
+        if lbl_files:
+            # Check if any file is DXF
+            dxf_files = [f for f in lbl_files if f.name.lower().endswith(".dxf")]
+            if dxf_files:
+                lbl_gdf = _load_dxf_texts(dxf_files[0])
+                if lbl_gdf is not None and not lbl_gdf.empty:
+                    # DXF has no CRS — assume same as points
+                    if pts_gdf is not None and pts_gdf.crs:
+                        lbl_gdf = lbl_gdf.set_crs(pts_gdf.crs)
+                    st.success(f"**{len(lbl_gdf)} text entities** from DXF")
+                    # Show unique layers for filtering
+                    layers = lbl_gdf["layer"].unique().tolist()
+                    if len(layers) > 1:
+                        selected_layers = st.multiselect(
+                            "Filter by DXF layer (optional)", layers, default=layers,
+                        )
+                        lbl_gdf = lbl_gdf[lbl_gdf["layer"].isin(selected_layers)]
+                    st.dataframe(lbl_gdf.drop(columns="geometry").head(10), use_container_width=True)
+                else:
+                    st.warning("No TEXT/MTEXT entities found in DXF.")
+            else:
+                lbl_gdf = _load_shp(lbl_files, "lbl")
+                if lbl_gdf is not None:
+                    st.success(f"**{len(lbl_gdf)} labels**, CRS: {lbl_gdf.crs}")
+                    st.dataframe(lbl_gdf.drop(columns="geometry").head(5), use_container_width=True)
+
+    if pts_gdf is not None and lbl_gdf is not None and not lbl_gdf.empty:
         # Pick which label field contains the Baum-ID text
         lbl_cols = [c for c in lbl_gdf.columns if c != "geometry"]
-        lbl_id_field = st.selectbox("Label field containing Baum-ID text", lbl_cols, key="join_lbl_field")
+        default_idx = lbl_cols.index("text") if "text" in lbl_cols else 0
+        lbl_id_field = st.selectbox("Label field containing Baum-ID text", lbl_cols, index=default_idx, key="join_lbl_field")
 
         max_dist = st.number_input(
             "Max match distance (m)", value=10.0, min_value=0.1, max_value=100.0, step=1.0,

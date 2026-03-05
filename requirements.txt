@@ -6,3 +6,4 @@ requests>=2.31.0
 folium>=0.15.0
 streamlit-folium>=0.18.0
 pdfplumber>=0.10.0
+ezdxf>=0.18.0
