@@ -61,128 +61,242 @@ def estimate_ansatzhoehe(hoehe, kronendurchmesser, method="ratio", ratio=0.25):
     return round(result)
 
 
+def _fmt(f):
+    """Format a field value for TXT output."""
+    if f is None:
+        return ""
+    s = str(f)
+    return "" if s in ("nan", "None") else s
+
+
+# VW parameter names (German) — exact match to VW Import Tree Survey dropdown.
+# Every parameter is included so VW can auto-map by column header name.
+# Empty columns are fine — VW maps them to <Kein>.
+VW_COLUMNS = [
+    # Coordinates
+    "x-Koordinate",
+    "y-Koordinate",
+    # Identity
+    "Baum-ID",
+    "Botanischer Name",
+    "Deutscher Name",
+    "Familie",
+    "Herkunft",
+    "Invasive Art",
+    # Dimensions
+    "Höhe",
+    "Kronendurchmesser",
+    "Krone Nord (N)",
+    "Krone Nordost (NO)",
+    "Krone Ost (O)",
+    "Krone Südost (SO)",
+    "Krone Süd (S)",
+    "Krone Südwest (SW)",
+    "Krone West (W)",
+    "Krone Nordwest (NW)",
+    "Lichte Höhe",
+    "Astansatzhöhe",
+    "Ausrichtung Hauptast",
+    "Stammumfang",
+    # Status
+    "Maßnahme",
+    "Veteranenbaum",
+    "Alter Baum",
+    "Pflanzjahr",
+    "Letzte Überprüfung am",
+    "Standort",
+    "Bemerkungen",
+    "Form",
+    "Struktur",
+    "Vitalität",
+    "Stammfuß-ø",
+    # Custom fields
+    "Feld 1",
+    "Feld 2",
+    "Feld 3",
+    "Feld 4",
+    "Feld 5",
+    "Feld 6",
+    "Zusatz 07",
+    "Zusatz 08",
+    "Zusatz 09",
+    "Zusatz 10",
+]
+
+
+# VW Maßnahme values — map our action terms to exact VW dropdown values.
+# Values already matching VW pass through; legacy terms get mapped.
+_ACTION_TO_VW = {
+    # Legacy terms (from old exports or English usage)
+    "Retain": "Sichern",
+    "Remove": "Entfernen",
+    "Transplant": "Umpflanzen - Am Standort",
+    "Roden": "Entfernen",
+    "Umpflanzen": "Umpflanzen - Am Standort",
+}
+
+# VW Vitalitätsstufe — map numeric grades to exact VW dropdown strings
+_VITALITAET_TO_VW = {
+    "0": "0 Krone harmonisch geschlossen, fast kein Totholz in der Krone",
+    "1": "1 Kronenmantel an wenigen Stellen zerklüftet, wenig Totholz im Dünnast- und Starkastbereich",
+    "2": "2 Vermehrt Totholz, Bildung einer Sekundärkrone",
+    "3": "3 Absterben von Ästen, sehr viel Totholz in der Krone",
+}
+
+
+def _map_action(val):
+    """Map action value to exact VW Maßnahme dropdown value."""
+    s = _fmt(val)
+    return _ACTION_TO_VW.get(s, s)
+
+
+def _map_vitalitaet(val):
+    """Map vitalitaet value to exact VW Vitalitätsstufe dropdown value.
+
+    Handles single values (0, 1, 2, 3) and ranges (0-1, 1-2).
+    For ranges, uses the worse (higher) value.
+    """
+    s = _fmt(val).strip().replace("–", "-")
+    if not s:
+        return ""
+    # If it's a range like "1-2", take the worse (higher) value
+    if "-" in s:
+        parts = s.split("-")
+        try:
+            worst = str(max(int(p.strip()) for p in parts))
+            return _VITALITAET_TO_VW.get(worst, s)
+        except ValueError:
+            pass
+    return _VITALITAET_TO_VW.get(s, s)
+
+
+def _build_vw_row(row, x, y, ansatzhoehe="", standort=""):
+    """Build a row list matching VW_COLUMNS from a GeoDataFrame row."""
+    deutsch = row.get("art_deutsch", "") or row.get("gattung_deutsch", "")
+    latein = row.get("art_latein", "") or row.get("gattung_latein", "")
+
+    return [
+        # Coordinates
+        f"{x:.3f}",
+        f"{y:.3f}",
+        # Identity
+        row.get("baum_id", ""),
+        latein,
+        deutsch,
+        row.get("familie", ""),
+        row.get("herkunft", ""),
+        row.get("invasive_art", ""),
+        # Dimensions
+        row.get("baumhoehe", ""),
+        row.get("kronendurchmesser", ""),
+        row.get("krone_n", ""),
+        row.get("krone_no", ""),
+        row.get("krone_o", ""),
+        row.get("krone_so", ""),
+        row.get("krone_s", ""),
+        row.get("krone_sw", ""),
+        row.get("krone_w", ""),
+        row.get("krone_nw", ""),
+        row.get("lichte_hoehe", ""),
+        ansatzhoehe,
+        row.get("ausrichtung_hauptast", ""),
+        row.get("stammumfang", ""),
+        # Status — mapped to exact VW dropdown values
+        _map_action(row.get("action", "")),
+        row.get("veteranenbaum", ""),
+        row.get("alter_baum", ""),
+        row.get("pflanzjahr", ""),
+        row.get("letzte_ueberpruefung", ""),
+        standort,
+        row.get("bemerkungen", ""),
+        row.get("kronenform", ""),
+        row.get("struktur", ""),
+        _map_vitalitaet(row.get("vitalitaet", "")),
+        row.get("stammfuss_durchmesser", ""),
+        # Custom fields — PDF extras that VW has no native field for
+        row.get("erhaltung", ""),           # Feld 1: Erhaltungswürdigkeit
+        row.get("verkehrssicherheit", ""),   # Feld 2: Verkehrssicherheit
+        row.get("schutzstatus", ""),         # Feld 3
+        row.get("anzahl_staemme", ""),       # Feld 4
+        row.get("ersatzpflanzungen", ""),    # Feld 5
+        row.get("feld6", ""),
+        row.get("zusatz07", ""),
+        row.get("zusatz08", ""),
+        row.get("zusatz09", ""),
+        row.get("zusatz10", ""),
+    ]
+
+
+def _export_vw_txt(all_rows: list[list]) -> str:
+    """Given a list of row-lists (each matching VW_COLUMNS), drop empty columns and build TXT."""
+    # Find which columns have at least one non-empty value
+    n_cols = len(VW_COLUMNS)
+    has_data = [False] * n_cols
+    for row in all_rows:
+        for i in range(n_cols):
+            if _fmt(row[i]):
+                has_data[i] = True
+
+    # Always keep x/y coordinates
+    has_data[0] = True  # x-Koordinate
+    has_data[1] = True  # y-Koordinate
+
+    keep = [i for i in range(n_cols) if has_data[i]]
+
+    header = "\t".join(VW_COLUMNS[i] for i in keep)
+    lines = [header]
+    for row in all_rows:
+        lines.append("\t".join(_fmt(row[i]) for i in keep))
+
+    return "\n".join(lines)
+
+
 def trees_to_vw_txt(trees_gdf: gpd.GeoDataFrame, output_crs_key: str,
-                    ansatz_method: str = "none", ansatz_ratio: float = 0.25,
-                    include_extra_cols: bool = False) -> str:
+                    ansatz_method: str = "none", ansatz_ratio: float = 0.25) -> str:
     """Convert normalized trees GeoDataFrame (EPSG:4326) to VectorWorks import TXT.
 
-    VW expects 12 tab-separated columns (by position):
-    Baum-ID, Koordinaten, Deutscher Name, Botanischer Name,
-    Stammumfang, Kronendurchmesser, Höhe, Ansatzhöhe,
-    Form, Vitalitätsstufe, Erhaltungsstufe, Bemerkungen
-
-    If include_extra_cols is True, adds Pflanzjahr and Standort (14 columns).
+    Uses exact VW German parameter names as column headers for auto-mapping.
+    Only includes columns that have data.
     """
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
 
-    columns = [
-        "Baum-ID", "Koordinaten", "Deutscher Name", "Botanischer Name",
-        "Stammumfang", "Kronendurchmesser", "Höhe", "Ansatzhöhe",
-        "Form", "Vitalitätsstufe", "Erhaltungsstufe", "Bemerkungen",
-    ]
-    if include_extra_cols:
-        # Insert before Bemerkungen
-        columns = columns[:11] + ["Pflanzjahr", "Standort"] + columns[11:]
-
-    header = "\t".join(columns)
-    lines = [header]
-
+    all_rows = []
     for _, row in trees_gdf.iterrows():
         x, y = transformer.transform(row.geometry.x, row.geometry.y)
-        coord_str = f"[{x:.3f}, {y:.3f}]"
 
-        baum_id = row.get("baum_id", "")
-        deutsch = row.get("art_deutsch", "") or row.get("gattung_deutsch", "")
-        latein = row.get("art_latein", "") or row.get("gattung_latein", "")
-        stammumfang = row.get("stammumfang", "")
-        kronendurchmesser = row.get("kronendurchmesser", "")
         hoehe = row.get("baumhoehe", "")
+        kd = row.get("kronendurchmesser", "")
 
-        # Ansatzhöhe
         if ansatz_method == "none":
-            ansatzhoehe = ""
+            ansatzhoehe = row.get("ansatzhoehe", "")
         else:
-            ansatzhoehe = estimate_ansatzhoehe(hoehe, kronendurchmesser,
+            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd,
                                                method=ansatz_method, ratio=ansatz_ratio)
 
-        form = ""
-        vitalitaet = ""
-        erhaltung = ""
-
-        # Bemerkungen: include Pflanzjahr + Standort here so VW always gets them
-        bemerkung_parts = []
-        pflanzjahr = row.get("pflanzjahr", "")
         strasse = row.get("strasse", "")
         hausnr = row.get("hausnummer", "")
         standort = f"{strasse} {hausnr}".strip() if strasse else ""
-        if pflanzjahr and str(pflanzjahr) not in ("", "0", "nan", "None"):
-            bemerkung_parts.append(f"Pflanzjahr {pflanzjahr}")
-        if standort:
-            bemerkung_parts.append(standort)
-        bemerkungen = ". ".join(str(p) for p in bemerkung_parts)
 
-        fields = [
-            baum_id, coord_str, deutsch, latein,
-            stammumfang, kronendurchmesser, hoehe, ansatzhoehe,
-            form, vitalitaet, erhaltung,
-        ]
+        all_rows.append(_build_vw_row(row, x, y, ansatzhoehe=ansatzhoehe, standort=standort))
 
-        if include_extra_cols:
-            fields.extend([pflanzjahr, standort])
-
-        fields.append(bemerkungen)
-
-        def fmt(f):
-            if f is None:
-                return ""
-            s = str(f)
-            if s in ("nan", "None"):
-                return ""
-            return s
-
-        lines.append("\t".join(fmt(f) for f in fields))
-
-    return "\n".join(lines)
+    return _export_vw_txt(all_rows)
 
 
 def pdf_trees_to_vw_txt(trees_gdf: gpd.GeoDataFrame, output_crs_key: str) -> str:
-    """Convert PDF-parsed trees (with real Ansatzhöhe, Kronenform, etc.) to VW import TXT.
+    """Convert PDF-parsed trees (with real survey data) to VW import TXT.
 
-    Uses the standard 12-column VW format with actual survey data.
+    Uses exact VW German parameter names as column headers.
+    Only includes columns that have data.
     """
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
 
-    header = "\t".join([
-        "Baum-ID", "Koordinaten", "Deutscher Name", "Botanischer Name",
-        "Stammumfang", "Kronendurchmesser", "Höhe", "Ansatzhöhe",
-        "Form", "Vitalitätsstufe", "Erhaltungsstufe", "Bemerkungen",
-    ])
-    lines = [header]
-
-    def fmt(f):
-        if f is None:
-            return ""
-        s = str(f)
-        return "" if s in ("nan", "None") else s
-
+    all_rows = []
     for _, row in trees_gdf.iterrows():
         x, y = transformer.transform(row.geometry.x, row.geometry.y)
-        coord_str = f"[{x:.3f}, {y:.3f}]"
 
-        fields = [
-            row.get("baum_id", ""),
-            coord_str,
-            row.get("art_deutsch", ""),
-            row.get("art_latein", ""),
-            row.get("stammumfang", ""),
-            row.get("kronendurchmesser", ""),
-            row.get("baumhoehe", ""),
-            row.get("ansatzhoehe", ""),
-            row.get("kronenform", ""),
-            row.get("vitalitaet", ""),
-            row.get("erhaltung", ""),
-            row.get("bemerkungen", ""),
-        ]
-        lines.append("\t".join(fmt(f) for f in fields))
+        ansatzhoehe = row.get("ansatzhoehe", "")
+        standort = row.get("standort", "")
 
-    return "\n".join(lines)
+        all_rows.append(_build_vw_row(row, x, y, ansatzhoehe=ansatzhoehe, standort=standort))
+
+    return _export_vw_txt(all_rows)

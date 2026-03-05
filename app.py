@@ -11,7 +11,7 @@ from folium.plugins import Draw
 from shapely.geometry import shape
 from streamlit_folium import st_folium
 
-from export import CRS_OPTIONS, resolve_crs, trees_to_vw_txt, pdf_trees_to_vw_txt
+from export import CRS_OPTIONS, VW_COLUMNS, resolve_crs, trees_to_vw_txt, pdf_trees_to_vw_txt
 from fetcher import (
     discover_fields,
     discover_typenames,
@@ -137,10 +137,6 @@ with mode_wfs:
     if ansatz_method == "ratio":
         ansatz_ratio = st.sidebar.slider("Ratio (Ansatzhöhe / Höhe)", 0.10, 0.50, 0.25, 0.05)
 
-    include_extra_cols = st.sidebar.checkbox(
-        "Extra columns (Pflanzjahr, Standort)", value=False,
-        help="Adds 2 extra columns. Disable for standard VW 12-column import.",
-    )
 
     # --- Define Area ---
     st.header("1. Define Area")
@@ -315,8 +311,7 @@ with mode_wfs:
 
             vw_txt = trees_to_vw_txt(filtered, output_crs,
                                       ansatz_method=ansatz_method,
-                                      ansatz_ratio=ansatz_ratio,
-                                      include_extra_cols=include_extra_cols)
+                                      ansatz_ratio=ansatz_ratio)
             st.text_area("Preview (first 10 lines)", "\n".join(vw_txt.split("\n")[:11]), height=300)
 
             st.download_button(
@@ -431,12 +426,20 @@ with mode_pdf:
                 # Build merged GeoDataFrame: SHP geometry + PDF attributes
                 pdf_dict = {t["baum_id"]: t for t in pdf_trees}
 
+                # Columns to carry over from input SHP (e.g. action from Join tab)
+                shp_carry_cols = [c for c in points_gdf.columns
+                                  if c not in ("geometry", id_field)]
+
                 rows = []
                 for _, pt in points_gdf.iterrows():
                     sid = str(pt[id_field])
                     if sid in pdf_dict:
                         tree_data = dict(pdf_dict[sid])
                         tree_data["geometry"] = pt.geometry
+                        # Carry over SHP fields not already in PDF data
+                        for col in shp_carry_cols:
+                            if col not in tree_data:
+                                tree_data[col] = pt.get(col, "")
                         rows.append(tree_data)
 
                 merged_gdf = gpd.GeoDataFrame(rows, crs="EPSG:4326")
@@ -446,7 +449,7 @@ with mode_pdf:
                 preview_cols = [c for c in [
                     "baum_id", "art_deutsch", "art_latein", "stammumfang",
                     "kronendurchmesser", "baumhoehe", "ansatzhoehe",
-                    "kronenform", "vitalitaet", "erhaltung", "bemerkungen",
+                    "kronenform", "vitalitaet", "erhaltung", "action", "bemerkungen",
                 ] if c in merged_gdf.columns]
                 st.dataframe(merged_gdf[preview_cols], use_container_width=True)
 
@@ -454,6 +457,7 @@ with mode_pdf:
                 centroid = merged_gdf.union_all().centroid
                 m3 = folium.Map(location=[centroid.y, centroid.x], zoom_start=17)
                 for _, tree in merged_gdf.iterrows():
+                    action_str = tree.get("action", "")
                     popup = (
                         f"<b>{tree.get('baum_id', '')}</b><br>"
                         f"{tree.get('art_deutsch', '')} ({tree.get('art_latein', '')})<br>"
@@ -462,6 +466,8 @@ with mode_pdf:
                         f"Vit: {tree.get('vitalitaet', '')}, "
                         f"Erh: {tree.get('erhaltung', '')}"
                     )
+                    if action_str and str(action_str) not in ("", "nan", "None"):
+                        popup += f"<br>Maßnahme: {action_str}"
                     folium.CircleMarker(
                         location=[tree.geometry.y, tree.geometry.x],
                         radius=5, color="green", fill=True,
@@ -618,6 +624,37 @@ with mode_join:
             help="Labels farther than this from any point are flagged as unmatched.",
         )
 
+        # Layer → VW Action mapping (DXF only)
+        layer_action_map = {}
+        if "layer" in lbl_gdf.columns:
+            # Exact VW Maßnahme dropdown values
+            vw_actions = [
+                "",
+                "Sichern",
+                "Sichern und Baumpflegemaßnahmen",
+                "Umpflanzen - Am Standort",
+                "Umpflanzen - Neuer Standort",
+                "Entfernen",
+                "Entnehmen - innerhalb 4 Wochen",
+                "Entnehmen - im nächsten Pflegezyklus",
+            ]
+            default_map = {
+                "LL-VEG-Baum-Nummern": "Sichern",
+                "LL-VEG-Baum-Nummern_Roden": "Entfernen",
+            }
+            with st.expander("Layer → VW Action mapping (Maßnahme)", expanded=True):
+                st.caption("Map DXF layers to VectorWorks **Existing Tree** Action field.")
+                unique_layers = lbl_gdf["layer"].unique().tolist()
+                for layer_name in unique_layers:
+                    default = default_map.get(layer_name, "")
+                    idx = vw_actions.index(default) if default in vw_actions else 0
+                    chosen = st.selectbox(
+                        f"`{layer_name}`", vw_actions, index=idx,
+                        key=f"action_map_{layer_name}",
+                    )
+                    if chosen:
+                        layer_action_map[layer_name] = chosen
+
         if st.button("Run Nearest Join", key="join_btn"):
             with st.spinner("Joining..."):
                 # Project to a metric CRS for distance calculation
@@ -631,9 +668,15 @@ with mode_join:
                 pts_m = pts_gdf.to_crs(metric_crs).copy()
                 lbl_m = lbl_gdf.to_crs(metric_crs).copy()
 
+                # Include layer column for DXF action mapping
+                join_cols = [lbl_id_field, "geometry"]
+                has_layer = "layer" in lbl_m.columns
+                if has_layer:
+                    join_cols = [lbl_id_field, "layer", "geometry"]
+
                 # sjoin_nearest
                 joined = gpd.sjoin_nearest(
-                    pts_m, lbl_m[[lbl_id_field, "geometry"]],
+                    pts_m, lbl_m[join_cols],
                     how="left", max_distance=max_dist, distance_col="dist_m",
                 )
 
@@ -642,12 +685,26 @@ with mode_join:
                 result["baum_id"] = joined[lbl_id_field].values
                 result["match_dist_m"] = joined["dist_m"].values
 
+                # Map DXF layer → VW Action (Maßnahme)
+                if has_layer and layer_action_map:
+                    result["action"] = (
+                        joined["layer"]
+                        .map(layer_action_map)
+                        .fillna("")
+                        .values
+                    )
+
                 matched = result["baum_id"].notna().sum()
                 unmatched = result["baum_id"].isna().sum()
 
-                col_r1, col_r2 = st.columns(2)
-                col_r1.metric("Matched", int(matched))
-                col_r2.metric("Unmatched", int(unmatched))
+                metric_cols = st.columns(4 if "action" in result.columns else 2)
+                metric_cols[0].metric("Matched", int(matched))
+                metric_cols[1].metric("Unmatched", int(unmatched))
+                if "action" in result.columns:
+                    retain_n = result["action"].str.startswith("Sichern").sum()
+                    remove_n = result["action"].isin(["Entfernen", "Entnehmen - innerhalb 4 Wochen", "Entnehmen - im nächsten Pflegezyklus"]).sum()
+                    metric_cols[2].metric("Sichern", int(retain_n))
+                    metric_cols[3].metric("Entfernen", int(remove_n))
 
                 st.session_state["join_result"] = result
 
@@ -665,32 +722,58 @@ with mode_join:
             m_join = folium.Map(location=[centroid.y, centroid.x], zoom_start=17)
             for _, row in result_4326.iterrows():
                 bid = row.get("baum_id", "")
-                color = "green" if pd.notna(bid) and bid else "red"
+                action = row.get("action", "")
+                has_action = pd.notna(action) and action
+                if has_action and action.startswith(("Entfernen", "Entnehmen")):
+                    color = "red"
+                elif pd.notna(bid) and bid:
+                    color = "green"
+                else:
+                    color = "gray"
                 label = str(bid) if pd.notna(bid) else "?"
                 dist = row.get("match_dist_m", 0)
+                popup_text = f"<b>{label}</b><br>dist: {dist:.1f} m"
+                if has_action:
+                    popup_text += f"<br>Action: {action}"
                 folium.CircleMarker(
                     location=[row.geometry.y, row.geometry.x],
                     radius=5, color=color, fill=True,
                     fill_color=color, fill_opacity=0.7,
-                    popup=folium.Popup(f"<b>{label}</b><br>dist: {dist:.1f} m", max_width=200),
+                    popup=folium.Popup(popup_text, max_width=200),
                 ).add_to(m_join)
             st_folium(m_join, width=700, height=500, key="join_map")
 
             # Download as SHP (zip)
+            zip_bytes = None
             with tempfile.TemporaryDirectory() as tmpdir:
-                out_path = Path(tmpdir) / "trees_with_ids"
-                result.to_file(out_path, driver="ESRI Shapefile")
+                out_path = Path(tmpdir) / "trees_with_ids.shp"
+                export_gdf = result.to_crs(resolve_crs(output_crs))
+                export_gdf.to_file(str(out_path), driver="ESRI Shapefile")
                 # Zip all shapefile components
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in out_path.parent.glob("trees_with_ids.*"):
-                        zf.write(f, f.name)
-                zip_buffer.seek(0)
+                    for f in Path(tmpdir).glob("trees_with_ids.*"):
+                        zf.write(str(f), f.name)
+                zip_bytes = zip_buffer.getvalue()
 
+            if zip_bytes:
                 st.download_button(
-                    label="Download SHP (with Baum-IDs)",
-                    data=zip_buffer.getvalue(),
+                    label="Download SHP (Baum-IDs + Action)",
+                    data=zip_bytes,
                     file_name="trees_with_ids.zip",
                     mime="application/zip",
                     key="join_download",
                 )
+
+            # Also offer VW TXT export (with coordinates + action)
+            result_4326_export = result.to_crs("EPSG:4326")
+            vw_txt = trees_to_vw_txt(result_4326_export, output_crs,
+                                      ansatz_method=ansatz_method,
+                                      ansatz_ratio=ansatz_ratio)
+            st.download_button(
+                label="Download VW Import TXT (with Maßnahme)",
+                data=vw_txt.encode("utf-8"),
+                file_name="Baumkataster_VW_Import.txt",
+                mime="text/plain",
+                key="join_txt_download",
+            )
