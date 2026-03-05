@@ -11,7 +11,11 @@ from folium.plugins import Draw
 from shapely.geometry import shape
 from streamlit_folium import st_folium
 
-from export import CRS_OPTIONS, VW_COLUMNS, resolve_crs, trees_to_vw_txt, pdf_trees_to_vw_txt
+from export import (
+    CRS_OPTIONS, VW_COLUMNS, resolve_crs,
+    trees_to_vw_txt, pdf_trees_to_vw_txt,
+    trees_to_vw_xlsx, pdf_trees_to_vw_xlsx,
+)
 from fetcher import (
     discover_fields,
     discover_typenames,
@@ -314,12 +318,24 @@ with mode_wfs:
                                       ansatz_ratio=ansatz_ratio)
             st.text_area("Preview (first 10 lines)", "\n".join(vw_txt.split("\n")[:11]), height=300)
 
-            st.download_button(
-                label="Download Baumkataster_VW_Import.txt",
-                data=vw_txt.encode("utf-8"),
-                file_name="Baumkataster_VW_Import.txt",
-                mime="text/plain",
-            )
+            dl_txt, dl_xlsx = st.columns(2)
+            with dl_txt:
+                st.download_button(
+                    label="Download TXT",
+                    data=vw_txt.encode("utf-8"),
+                    file_name="Baumkataster_VW_Import.txt",
+                    mime="text/plain",
+                )
+            with dl_xlsx:
+                vw_xlsx = trees_to_vw_xlsx(filtered, output_crs,
+                                           ansatz_method=ansatz_method,
+                                           ansatz_ratio=ansatz_ratio)
+                st.download_button(
+                    label="Download XLSX",
+                    data=vw_xlsx,
+                    file_name="Baumkataster_VW_Import.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
 
 # ============================================================================
@@ -468,19 +484,25 @@ with mode_pdf:
                     )
                     if action_str and str(action_str) not in ("", "nan", "None"):
                         popup += f"<br>Maßnahme: {action_str}"
+                    if action_str and str(action_str).startswith(("Entfernen", "Entnehmen")):
+                        color = "red"
+                    else:
+                        color = "green"
                     folium.CircleMarker(
                         location=[tree.geometry.y, tree.geometry.x],
-                        radius=5, color="green", fill=True,
-                        fill_color="green", fill_opacity=0.7,
+                        radius=5, color=color, fill=True,
+                        fill_color=color, fill_opacity=0.7,
                         popup=folium.Popup(popup, max_width=300),
                     ).add_to(m3)
                 st_folium(m3, width=700, height=500, key="pdf_trees_map")
 
                 # Export
-                st.header("4. Export VectorWorks Import TXT")
+                st.header("4. Export VectorWorks Import")
                 st.caption(f"Output CRS: **{output_crs}** — {CRS_OPTIONS[output_crs]}")
 
-                vw_txt = pdf_trees_to_vw_txt(merged_gdf, output_crs)
+                vw_txt = pdf_trees_to_vw_txt(merged_gdf, output_crs,
+                                             ansatz_method=ansatz_method,
+                                             ansatz_ratio=ansatz_ratio)
                 st.text_area(
                     "Preview (first 10 lines)",
                     "\n".join(vw_txt.split("\n")[:11]),
@@ -488,13 +510,26 @@ with mode_pdf:
                     key="pdf_preview",
                 )
 
-                st.download_button(
-                    label="Download Baumkataster_VW_Import.txt",
-                    data=vw_txt.encode("utf-8"),
-                    file_name="Baumkataster_VW_Import.txt",
-                    mime="text/plain",
-                    key="pdf_download",
-                )
+                dl_txt, dl_xlsx = st.columns(2)
+                with dl_txt:
+                    st.download_button(
+                        label="Download TXT",
+                        data=vw_txt.encode("utf-8"),
+                        file_name="Baumkataster_VW_Import.txt",
+                        mime="text/plain",
+                        key="pdf_download",
+                    )
+                with dl_xlsx:
+                    vw_xlsx = pdf_trees_to_vw_xlsx(merged_gdf, output_crs,
+                                                   ansatz_method=ansatz_method,
+                                                   ansatz_ratio=ansatz_ratio)
+                    st.download_button(
+                        label="Download XLSX",
+                        data=vw_xlsx,
+                        file_name="Baumkataster_VW_Import.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="pdf_xlsx_download",
+                    )
 
 
 # ============================================================================
@@ -668,43 +703,77 @@ with mode_join:
                 pts_m = pts_gdf.to_crs(metric_crs).copy()
                 lbl_m = lbl_gdf.to_crs(metric_crs).copy()
 
-                # Include layer column for DXF action mapping
-                join_cols = [lbl_id_field, "geometry"]
                 has_layer = "layer" in lbl_m.columns
-                if has_layer:
-                    join_cols = [lbl_id_field, "layer", "geometry"]
 
-                # sjoin_nearest
-                joined = gpd.sjoin_nearest(
-                    pts_m, lbl_m[join_cols],
-                    how="left", max_distance=max_dist, distance_col="dist_m",
-                )
+                # Two-round nearest assignment:
+                # Round 1: Greedy 1-to-1 (each label used at most once)
+                # Round 2: Leftover points get nearest label (allows reuse for mehrstämmige)
 
-                # Add the ID to the original points
+                pts_geom = pts_m.geometry.values
+                lbl_geom = lbl_m.geometry.values
+
+                # Build candidate pairs (pt_idx, lbl_idx, dist)
+                candidates = []
+                for i, pg in enumerate(pts_geom):
+                    for j, lg in enumerate(lbl_geom):
+                        d = pg.distance(lg)
+                        if d <= max_dist:
+                            candidates.append((i, j, d))
+
+                # Sort by distance (closest first)
+                candidates.sort(key=lambda c: c[2])
+
+                # Round 1: greedy 1-to-1
+                used_pts = set()
+                used_lbls = set()
+                assignments = {}  # pt_idx -> (lbl_idx, dist)
+
+                for pt_i, lbl_j, dist in candidates:
+                    if pt_i not in used_pts and lbl_j not in used_lbls:
+                        assignments[pt_i] = (lbl_j, dist)
+                        used_pts.add(pt_i)
+                        used_lbls.add(lbl_j)
+
+                # Round 2: unmatched points get nearest label (reuse allowed)
+                unmatched_pts = set(range(len(pts_geom))) - used_pts
+                for pt_i, lbl_j, dist in candidates:
+                    if pt_i in unmatched_pts:
+                        assignments[pt_i] = (lbl_j, dist)
+                        unmatched_pts.discard(pt_i)
+
+                # Build result
                 result = pts_gdf.copy()
-                result["baum_id"] = joined[lbl_id_field].values
-                result["match_dist_m"] = joined["dist_m"].values
+                baum_ids = [None] * len(result)
+                match_dists = [None] * len(result)
+                actions = [""] * len(result)
 
-                # Map DXF layer → VW Action (Maßnahme)
+                for pt_i, (lbl_j, dist) in assignments.items():
+                    baum_ids[pt_i] = lbl_m.iloc[lbl_j][lbl_id_field]
+                    match_dists[pt_i] = dist
+                    if has_layer and layer_action_map:
+                        layer_val = lbl_m.iloc[lbl_j].get("layer", "")
+                        actions[pt_i] = layer_action_map.get(layer_val, "")
+
+                result["baum_id"] = baum_ids
+                result["match_dist_m"] = match_dists
                 if has_layer and layer_action_map:
-                    result["action"] = (
-                        joined["layer"]
-                        .map(layer_action_map)
-                        .fillna("")
-                        .values
-                    )
+                    result["action"] = actions
 
                 matched = result["baum_id"].notna().sum()
                 unmatched = result["baum_id"].isna().sum()
+                dupes = result["baum_id"].dropna().duplicated().sum()
 
-                metric_cols = st.columns(4 if "action" in result.columns else 2)
+                n_metric = 5 if "action" in result.columns else 3
+                metric_cols = st.columns(n_metric)
                 metric_cols[0].metric("Matched", int(matched))
                 metric_cols[1].metric("Unmatched", int(unmatched))
+                metric_cols[2].metric("Mehrstämmig", int(dupes),
+                                      help="Points sharing a label (round 2)")
                 if "action" in result.columns:
-                    retain_n = result["action"].str.startswith("Sichern").sum()
+                    retain_n = result["action"].astype(str).str.startswith("Sichern").sum()
                     remove_n = result["action"].isin(["Entfernen", "Entnehmen - innerhalb 4 Wochen", "Entnehmen - im nächsten Pflegezyklus"]).sum()
-                    metric_cols[2].metric("Sichern", int(retain_n))
-                    metric_cols[3].metric("Entfernen", int(remove_n))
+                    metric_cols[3].metric("Sichern", int(retain_n))
+                    metric_cols[4].metric("Entfernen", int(remove_n))
 
                 st.session_state["join_result"] = result
 
@@ -765,15 +834,28 @@ with mode_join:
                     key="join_download",
                 )
 
-            # Also offer VW TXT export (with coordinates + action)
+            # Also offer VW TXT/XLSX export (with coordinates + action)
             result_4326_export = result.to_crs("EPSG:4326")
-            vw_txt = trees_to_vw_txt(result_4326_export, output_crs,
-                                      ansatz_method=ansatz_method,
-                                      ansatz_ratio=ansatz_ratio)
-            st.download_button(
-                label="Download VW Import TXT (with Maßnahme)",
-                data=vw_txt.encode("utf-8"),
-                file_name="Baumkataster_VW_Import.txt",
-                mime="text/plain",
-                key="join_txt_download",
-            )
+            dl_txt, dl_xlsx = st.columns(2)
+            with dl_txt:
+                vw_txt = trees_to_vw_txt(result_4326_export, output_crs,
+                                          ansatz_method=ansatz_method,
+                                          ansatz_ratio=ansatz_ratio)
+                st.download_button(
+                    label="Download VW TXT",
+                    data=vw_txt.encode("utf-8"),
+                    file_name="Baumkataster_VW_Import.txt",
+                    mime="text/plain",
+                    key="join_txt_download",
+                )
+            with dl_xlsx:
+                vw_xlsx = trees_to_vw_xlsx(result_4326_export, output_crs,
+                                            ansatz_method=ansatz_method,
+                                            ansatz_ratio=ansatz_ratio)
+                st.download_button(
+                    label="Download VW XLSX",
+                    data=vw_xlsx,
+                    file_name="Baumkataster_VW_Import.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="join_xlsx_download",
+                )

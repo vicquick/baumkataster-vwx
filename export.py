@@ -1,4 +1,6 @@
-"""VectorWorks Import TXT generator."""
+"""VectorWorks Import TXT/XLSX generator."""
+
+import io
 
 import geopandas as gpd
 from pyproj import CRS, Transformer
@@ -251,52 +253,102 @@ def _export_vw_txt(all_rows: list[list]) -> str:
     return "\n".join(lines)
 
 
-def trees_to_vw_txt(trees_gdf: gpd.GeoDataFrame, output_crs_key: str,
-                    ansatz_method: str = "none", ansatz_ratio: float = 0.25) -> str:
-    """Convert normalized trees GeoDataFrame (EPSG:4326) to VectorWorks import TXT.
+def _export_vw_xlsx(all_rows: list[list]) -> bytes:
+    """Given a list of row-lists (each matching VW_COLUMNS), drop empty columns and build XLSX."""
+    import openpyxl
 
-    Uses exact VW German parameter names as column headers for auto-mapping.
-    Only includes columns that have data.
-    """
+    n_cols = len(VW_COLUMNS)
+    has_data = [False] * n_cols
+    for row in all_rows:
+        for i in range(n_cols):
+            if _fmt(row[i]):
+                has_data[i] = True
+
+    has_data[0] = True  # x-Koordinate
+    has_data[1] = True  # y-Koordinate
+
+    keep = [i for i in range(n_cols) if has_data[i]]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Baumkataster"
+
+    # Header row
+    for col_idx, i in enumerate(keep, 1):
+        ws.cell(row=1, column=col_idx, value=VW_COLUMNS[i])
+
+    # Data rows — try to write numbers as numbers for VW
+    for row_idx, row in enumerate(all_rows, 2):
+        for col_idx, i in enumerate(keep, 1):
+            val = _fmt(row[i])
+            if val:
+                try:
+                    val = float(val)
+                except ValueError:
+                    pass
+            else:
+                val = ""
+            ws.cell(row=row_idx, column=col_idx, value=val)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25):
+    """Build VW row data from WFS/REST GeoDataFrame."""
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
-
     all_rows = []
     for _, row in trees_gdf.iterrows():
         x, y = transformer.transform(row.geometry.x, row.geometry.y)
-
         hoehe = row.get("baumhoehe", "")
         kd = row.get("kronendurchmesser", "")
-
         if ansatz_method == "none":
             ansatzhoehe = row.get("ansatzhoehe", "")
         else:
-            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd,
-                                               method=ansatz_method, ratio=ansatz_ratio)
-
+            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=ansatz_method, ratio=ansatz_ratio)
         strasse = row.get("strasse", "")
         hausnr = row.get("hausnummer", "")
         standort = f"{strasse} {hausnr}".strip() if strasse else ""
-
         all_rows.append(_build_vw_row(row, x, y, ansatzhoehe=ansatzhoehe, standort=standort))
+    return all_rows
 
-    return _export_vw_txt(all_rows)
 
-
-def pdf_trees_to_vw_txt(trees_gdf: gpd.GeoDataFrame, output_crs_key: str) -> str:
-    """Convert PDF-parsed trees (with real survey data) to VW import TXT.
-
-    Uses exact VW German parameter names as column headers.
-    Only includes columns that have data.
-    """
+def _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25):
+    """Build VW row data from PDF-merged GeoDataFrame."""
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
-
     all_rows = []
     for _, row in trees_gdf.iterrows():
         x, y = transformer.transform(row.geometry.x, row.geometry.y)
-
         ansatzhoehe = row.get("ansatzhoehe", "")
+        if not _fmt(ansatzhoehe) and ansatz_method != "none":
+            hoehe = row.get("baumhoehe", "")
+            kd = row.get("kronendurchmesser", "")
+            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=ansatz_method, ratio=ansatz_ratio)
         standort = row.get("standort", "")
-
         all_rows.append(_build_vw_row(row, x, y, ansatzhoehe=ansatzhoehe, standort=standort))
+    return all_rows
 
-    return _export_vw_txt(all_rows)
+
+# --- TXT exports ---
+
+def trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25):
+    """WFS/REST pipeline → VW import TXT."""
+    return _export_vw_txt(_build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio))
+
+
+def pdf_trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25):
+    """PDF pipeline → VW import TXT."""
+    return _export_vw_txt(_build_pdf_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio))
+
+
+# --- XLSX exports ---
+
+def trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25):
+    """WFS/REST pipeline → VW import XLSX."""
+    return _export_vw_xlsx(_build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio))
+
+
+def pdf_trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25):
+    """PDF pipeline → VW import XLSX."""
+    return _export_vw_xlsx(_build_pdf_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio))
