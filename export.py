@@ -143,3 +143,46 @@ def trees_to_vw_txt(trees_gdf: gpd.GeoDataFrame, output_crs_key: str,
         lines.append("\t".join(fmt(f) for f in fields))
 
     return "\n".join(lines)
+
+
+def pdf_trees_to_vw_txt(trees_gdf: gpd.GeoDataFrame, output_crs_key: str) -> str:
+    """Convert PDF-parsed trees (with real Ansatzhöhe, Kronenform, etc.) to VW import TXT.
+
+    Uses the standard 12-column VW format with actual survey data.
+    """
+    transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
+
+    header = "\t".join([
+        "Baum-ID", "Koordinaten", "Deutscher Name", "Botanischer Name",
+        "Stammumfang", "Kronendurchmesser", "Höhe", "Ansatzhöhe",
+        "Form", "Vitalitätsstufe", "Erhaltungsstufe", "Bemerkungen",
+    ])
+    lines = [header]
+
+    def fmt(f):
+        if f is None:
+            return ""
+        s = str(f)
+        return "" if s in ("nan", "None") else s
+
+    for _, row in trees_gdf.iterrows():
+        x, y = transformer.transform(row.geometry.x, row.geometry.y)
+        coord_str = f"[{x:.3f}, {y:.3f}]"
+
+        fields = [
+            row.get("baum_id", ""),
+            coord_str,
+            row.get("art_deutsch", ""),
+            row.get("art_latein", ""),
+            row.get("stammumfang", ""),
+            row.get("kronendurchmesser", ""),
+            row.get("baumhoehe", ""),
+            row.get("ansatzhoehe", ""),
+            row.get("kronenform", ""),
+            row.get("vitalitaet", ""),
+            row.get("erhaltung", ""),
+            row.get("bemerkungen", ""),
+        ]
+        lines.append("\t".join(fmt(f) for f in fields))
+
+    return "\n".join(lines)
