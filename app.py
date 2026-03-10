@@ -16,7 +16,7 @@ from export import (
     trees_to_vw_txt, pdf_trees_to_vw_txt,
     trees_to_vw_xlsx, pdf_trees_to_vw_xlsx,
     generate_fixup_script,
-    estimate_baumhoehe, estimate_stammumfang,
+    estimate_baumhoehe, estimate_stammumfang, estimate_ansatzhoehe,
 )
 from fetcher import (
     discover_fields,
@@ -1014,14 +1014,30 @@ with mode_table:
                     tree_data = {
                         "geometry": ShapelyPoint(rx, ry),
                     }
+                    kd_val = ""
                     if d_field != "(none)":
-                        tree_data["kronendurchmesser"] = row.get(d_field, "")
+                        kd_val = row.get(d_field, "")
+                        tree_data["kronendurchmesser"] = kd_val
                     if id_field != "(none)":
                         tree_data["baum_id"] = row.get(id_field, "")
+
+                    # Baumhöhe: use mapped field, or estimate from KD
                     if hoehe_field != "(none)":
                         tree_data["baumhoehe"] = row.get(hoehe_field, "")
+                    elif estimate_from_kd and kd_val:
+                        tree_data["baumhoehe"] = estimate_baumhoehe(kd_val)
+
+                    # Stammumfang: use mapped field, or estimate from KD
                     if stu_field != "(none)":
                         tree_data["stammumfang"] = row.get(stu_field, "")
+                    elif estimate_from_kd and kd_val:
+                        tree_data["stammumfang"] = estimate_stammumfang(kd_val)
+
+                    # Ansatzhöhe: estimate from height
+                    h_val = tree_data.get("baumhoehe", "")
+                    if ansatz_method != "none" and h_val:
+                        tree_data["ansatzhoehe"] = estimate_ansatzhoehe(
+                            h_val, kd_val, method=ansatz_method, ratio=ansatz_ratio)
 
                     rows_out.append(tree_data)
 
@@ -1046,7 +1062,14 @@ with mode_table:
             for _, tree in result_4326.iterrows():
                 bid = tree.get("baum_id", "")
                 kd = tree.get("kronendurchmesser", "")
-                popup = f"<b>{bid}</b><br>KD: {kd}"
+                h = tree.get("baumhoehe", "")
+                stu = tree.get("stammumfang", "")
+                ah = tree.get("ansatzhoehe", "")
+                popup = (
+                    f"<b>{bid}</b><br>KD: {kd} m"
+                    f"<br>H: {h} m, StU: {stu} cm"
+                    f"<br>Ansatz: {ah} m"
+                )
                 folium.CircleMarker(
                     location=[tree.geometry.y, tree.geometry.x],
                     radius=5, color="green", fill=True,
