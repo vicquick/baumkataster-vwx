@@ -1014,6 +1014,7 @@ with mode_table:
         with col_map2:
             hoehe_field = st.selectbox("Baumhöhe field", none_opt, key="tbl_h_field")
             stu_field = st.selectbox("Stammumfang field", none_opt, key="tbl_stu_field")
+            feld1_field = st.selectbox("Feld 1 (custom tag)", none_opt, key="tbl_feld1_field")
 
         if st.button("Build VW Import", key="tbl_build_btn"):
             with st.spinner("Building..."):
@@ -1045,6 +1046,8 @@ with mode_table:
                         tree_data["kronendurchmesser"] = kd_val
                     if id_field != "(none)":
                         tree_data["baum_id"] = row.get(id_field, "")
+                    if feld1_field != "(none)":
+                        tree_data["erhaltung"] = row.get(feld1_field, "")
 
                     # Baumhöhe: use mapped field, or estimate from KD
                     if hoehe_field != "(none)":
