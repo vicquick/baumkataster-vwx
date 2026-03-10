@@ -16,6 +16,7 @@ from export import (
     trees_to_vw_txt, pdf_trees_to_vw_txt,
     trees_to_vw_xlsx, pdf_trees_to_vw_xlsx,
     generate_fixup_script,
+    estimate_baumhoehe, estimate_stammumfang,
 )
 from fetcher import (
     discover_fields,
@@ -64,6 +65,27 @@ st.sidebar.caption(
     "Values may import as 'Custom/Eigen' despite correct format. "
     "Workaround: set Action manually in VW after import."
 )
+
+st.sidebar.header("Dimension Estimation")
+estimate_from_kd = st.sidebar.checkbox(
+    "Estimate Höhe & StU from Kronendurchmesser",
+    value=True,
+    help="When Baumhöhe or Stammumfang are missing, estimate from KD using urban allometry: "
+         "Höhe ≈ KD×1.4+1.5, StU ≈ KD×18+20 (cm).",
+)
+ansatz_method = st.sidebar.selectbox(
+    "Ansatzhöhe estimation",
+    ["none", "ratio", "kd"],
+    format_func=lambda x: {
+        "none": "Leave empty",
+        "ratio": "Höhe × Ratio (recommended)",
+        "kd": "Höhe − Kronendurchmesser",
+    }[x],
+    index=1,
+)
+ansatz_ratio = 0.25
+if ansatz_method == "ratio":
+    ansatz_ratio = st.sidebar.slider("Ratio (Ansatzhöhe / Höhe)", 0.10, 0.50, 0.25, 0.05)
 
 # ============================================================================
 # TOP-LEVEL TABS
@@ -142,21 +164,6 @@ with mode_wfs:
                     }
 
     max_features = st.sidebar.number_input("Max features to fetch", 100, 50000, 5000)
-
-    st.sidebar.header("Ansatzhöhe (Kronenansatz)")
-    ansatz_method = st.sidebar.selectbox(
-        "Estimation method",
-        ["none", "ratio", "kd"],
-        format_func=lambda x: {
-            "none": "Leave empty",
-            "ratio": "Höhe × Ratio (recommended)",
-            "kd": "Höhe − Kronendurchmesser",
-        }[x],
-        index=1,
-    )
-    ansatz_ratio = 0.25
-    if ansatz_method == "ratio":
-        ansatz_ratio = st.sidebar.slider("Ratio (Ansatzhöhe / Höhe)", 0.10, 0.50, 0.25, 0.05)
 
 
     # --- Define Area ---
@@ -1057,7 +1064,8 @@ with mode_table:
                 vw_txt = trees_to_vw_txt(result_4326, output_crs,
                                           ansatz_method=ansatz_method,
                                           ansatz_ratio=ansatz_ratio,
-                                          lang=vw_lang)
+                                          lang=vw_lang,
+                                          estimate_from_kd=estimate_from_kd)
                 st.download_button(
                     label="Download TXT",
                     data=vw_txt.encode("utf-8"),
@@ -1069,7 +1077,8 @@ with mode_table:
                 vw_xlsx = trees_to_vw_xlsx(result_4326, output_crs,
                                             ansatz_method=ansatz_method,
                                             ansatz_ratio=ansatz_ratio,
-                                            lang=vw_lang)
+                                            lang=vw_lang,
+                                            estimate_from_kd=estimate_from_kd)
                 st.download_button(
                     label="Download XLSX",
                     data=vw_xlsx,

@@ -42,6 +42,38 @@ def resolve_crs(key: str):
     return key
 
 
+def estimate_baumhoehe(kronendurchmesser):
+    """Estimate tree height from crown diameter using urban allometry.
+
+    Based on typical urban broadleaf relationships:
+      Höhe ≈ KD × 1.4 + 1.5
+    E.g. KD=5m → ~8.5m, KD=7m → ~11.3m, KD=10m → ~15.5m
+    """
+    try:
+        kd = float(kronendurchmesser)
+    except (TypeError, ValueError):
+        return ""
+    if kd <= 0:
+        return ""
+    return round(kd * 1.4 + 1.5)
+
+
+def estimate_stammumfang(kronendurchmesser):
+    """Estimate trunk circumference (cm) from crown diameter (m).
+
+    Based on typical urban broadleaf relationships:
+      StU ≈ KD × 18 + 20
+    E.g. KD=5m → ~110cm, KD=7m → ~146cm, KD=10m → ~200cm
+    """
+    try:
+        kd = float(kronendurchmesser)
+    except (TypeError, ValueError):
+        return ""
+    if kd <= 0:
+        return ""
+    return round(kd * 18 + 20)
+
+
 def estimate_ansatzhoehe(hoehe, kronendurchmesser, method="ratio", ratio=0.25):
     """Estimate Ansatzhöhe (crown base height) from tree height and crown diameter.
 
@@ -384,7 +416,8 @@ def _export_vw_xlsx(all_rows: list[list], lang="en") -> bytes:
     return buf.getvalue()
 
 
-def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25, lang="en"):
+def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
+                    lang="en", estimate_from_kd=False):
     """Build VW row data from WFS/REST GeoDataFrame."""
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
     all_rows = []
@@ -392,8 +425,21 @@ def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_rati
         x, y = transformer.transform(row.geometry.x, row.geometry.y)
         hoehe = row.get("baumhoehe", "")
         kd = row.get("kronendurchmesser", "")
+        stu = row.get("stammumfang", "")
+
+        # Estimate missing dimensions from KD if enabled
+        if estimate_from_kd and _fmt(kd):
+            if not _fmt(hoehe):
+                hoehe = estimate_baumhoehe(kd)
+                row = dict(row)
+                row["baumhoehe"] = hoehe
+            if not _fmt(stu):
+                stu = estimate_stammumfang(kd)
+                row = dict(row)
+                row["stammumfang"] = stu
+
         if ansatz_method == "none":
-            ansatzhoehe = row.get("ansatzhoehe", "")
+            ansatzhoehe = row.get("ansatzhoehe", "") if hasattr(row, "get") else row.get("ansatzhoehe", "")
         else:
             ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=ansatz_method, ratio=ansatz_ratio)
         strasse = row.get("strasse", "")
@@ -421,9 +467,11 @@ def _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_rati
 
 # --- TXT exports ---
 
-def trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25, lang="en"):
+def trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
+                    lang="en", estimate_from_kd=False):
     """WFS/REST pipeline → VW import TXT."""
-    rows = _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio, lang=lang)
+    rows = _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio,
+                           lang=lang, estimate_from_kd=estimate_from_kd)
     return _export_vw_txt(rows, lang=lang)
 
 
@@ -435,9 +483,11 @@ def pdf_trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_
 
 # --- XLSX exports ---
 
-def trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25, lang="en"):
+def trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
+                     lang="en", estimate_from_kd=False):
     """WFS/REST pipeline → VW import XLSX."""
-    rows = _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio, lang=lang)
+    rows = _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio,
+                           lang=lang, estimate_from_kd=estimate_from_kd)
     return _export_vw_xlsx(rows, lang=lang)
 
 
