@@ -971,29 +971,47 @@ with mode_table:
 
         non_geom = [c for c in tbl_gdf.columns if c != "geometry"]
 
+        st.subheader("Coordinate Source")
+        coord_source = st.radio(
+            "Where to get tree positions from",
+            ["geometry", "attributes"],
+            format_func=lambda x: {
+                "geometry": "Geometry centroid (recommended for polygon/circle exports)",
+                "attributes": "X/Y attribute fields (manual coordinate columns)",
+            }[x],
+            index=0,
+            key="tbl_coord_source",
+        )
+
+        x_field = y_field = coord_units = None
+        if coord_source == "attributes":
+            col_attr1, col_attr2 = st.columns(2)
+            with col_attr1:
+                x_field = st.selectbox("X coordinate field", non_geom, key="tbl_x_field")
+                y_field = st.selectbox("Y coordinate field", non_geom,
+                                       index=min(1, len(non_geom) - 1), key="tbl_y_field")
+            with col_attr2:
+                coord_units = st.selectbox(
+                    "Coordinate units in table",
+                    ["m (Meters)", "mm (Millimeters)"],
+                    index=1,
+                    key="tbl_coord_units",
+                    help="VectorWorks often exports coordinates in mm when document is set to mm.",
+                )
+
+        # CRS uses sidebar Input/Output settings (same as other tabs)
+        tbl_input_crs = input_crs_override if input_crs_override else "EPSG:31467"
+        st.info(f"Input CRS: **{tbl_input_crs}** / Output CRS: **{output_crs}** — change in sidebar")
+
         st.subheader("Field Mapping")
         col_map1, col_map2 = st.columns(2)
 
         with col_map1:
-            x_field = st.selectbox("X coordinate field", non_geom, key="tbl_x_field")
-            y_field = st.selectbox("Y coordinate field", non_geom,
-                                   index=min(1, len(non_geom) - 1), key="tbl_y_field")
-            coord_units = st.selectbox(
-                "Coordinate units in table",
-                ["m (Meters)", "mm (Millimeters)"],
-                index=1,
-                key="tbl_coord_units",
-                help="VectorWorks often exports coordinates in mm when document is set to mm.",
-            )
-            # CRS uses sidebar Input/Output settings (same as other tabs)
-            tbl_input_crs = input_crs_override if input_crs_override else "EPSG:31467"
-            st.info(f"Input CRS: **{tbl_input_crs}** / Output CRS: **{output_crs}** — change in sidebar")
-
-        with col_map2:
-            # Optional field mappings for tree attributes
             none_opt = ["(none)"] + non_geom
             d_field = st.selectbox("Kronendurchmesser (D) field", none_opt, key="tbl_d_field")
             id_field = st.selectbox("Baum-ID field", none_opt, key="tbl_id_field")
+
+        with col_map2:
             hoehe_field = st.selectbox("Baumhöhe field", none_opt, key="tbl_h_field")
             stu_field = st.selectbox("Stammumfang field", none_opt, key="tbl_stu_field")
 
@@ -1001,19 +1019,26 @@ with mode_table:
             with st.spinner("Building..."):
                 from shapely.geometry import Point as ShapelyPoint
 
-                divisor = 1000.0 if "mm" in coord_units else 1.0
-
                 rows_out = []
                 for _, row in tbl_gdf.iterrows():
-                    try:
-                        rx = float(row[x_field]) / divisor
-                        ry = float(row[y_field]) / divisor
-                    except (TypeError, ValueError):
-                        continue
+                    # Get coordinates
+                    if coord_source == "geometry":
+                        geom = row.geometry
+                        if geom is None or geom.is_empty:
+                            continue
+                        centroid = geom.centroid
+                        pt = ShapelyPoint(centroid.x, centroid.y)
+                    else:
+                        divisor = 1000.0 if coord_units and "mm" in coord_units else 1.0
+                        try:
+                            rx = float(row[x_field]) / divisor
+                            ry = float(row[y_field]) / divisor
+                        except (TypeError, ValueError):
+                            continue
+                        pt = ShapelyPoint(rx, ry)
 
-                    tree_data = {
-                        "geometry": ShapelyPoint(rx, ry),
-                    }
+                    tree_data = {"geometry": pt}
+
                     kd_val = ""
                     if d_field != "(none)":
                         kd_val = row.get(d_field, "")
@@ -1042,9 +1067,15 @@ with mode_table:
                     rows_out.append(tree_data)
 
                 if not rows_out:
-                    st.error("No valid rows — check your X/Y field mapping.")
+                    st.error("No valid rows — check coordinate source and field mapping.")
                 else:
-                    result_gdf = gpd.GeoDataFrame(rows_out, crs=resolve_crs(tbl_input_crs))
+                    if coord_source == "geometry" and tbl_gdf.crs:
+                        src_crs = tbl_gdf.crs
+                        if input_crs_override:
+                            src_crs = resolve_crs(input_crs_override)
+                    else:
+                        src_crs = resolve_crs(tbl_input_crs)
+                    result_gdf = gpd.GeoDataFrame(rows_out, crs=src_crs)
                     result_4326 = result_gdf.to_crs("EPSG:4326")
                     st.session_state["tbl_result"] = result_4326
                     st.success(f"**{len(result_4326)} trees** ready for export")
