@@ -15,6 +15,7 @@ from export import (
     CRS_OPTIONS, VW_COLUMNS, resolve_crs,
     trees_to_vw_txt, pdf_trees_to_vw_txt,
     trees_to_vw_xlsx, pdf_trees_to_vw_xlsx,
+    generate_fixup_script,
 )
 from fetcher import (
     discover_fields,
@@ -48,10 +49,26 @@ output_crs_label = st.sidebar.selectbox(
 )
 output_crs = output_crs_label.split(" — ")[0]
 
+st.sidebar.header("VW Export Values")
+vw_lang = st.sidebar.radio(
+    "Enum values (Maßnahme, Vitalität)",
+    ["en", "de"],
+    format_func=lambda x: "English (Retain/Remove/Good/Poor)" if x == "en" else "Deutsch (Sichern/Entfernen/0-3)",
+    index=0,
+    help="Column headers are always German for VW auto-mapping. "
+         "VW may match enum values in English internally (Retain, Remove, Excellent, Good, Average, Poor).",
+)
+st.sidebar.caption(
+    "**Note:** VW 2026 has known bugs with Action/Maßnahme import "
+    "([VB-214920](https://forum.vectorworks.net), [VB-216372](https://forum.vectorworks.net)). "
+    "Values may import as 'Custom/Eigen' despite correct format. "
+    "Workaround: set Action manually in VW after import."
+)
+
 # ============================================================================
 # TOP-LEVEL TABS
 # ============================================================================
-mode_wfs, mode_pdf, mode_join = st.tabs(["City WFS / REST", "PDF Baumgutachten", "Label → Point Join"])
+mode_wfs, mode_pdf, mode_join, mode_table = st.tabs(["City WFS / REST", "PDF Baumgutachten", "Label → Point Join", "Table → VW Import"])
 
 # ============================================================================
 # MODE 1: City WFS / REST
@@ -315,7 +332,8 @@ with mode_wfs:
 
             vw_txt = trees_to_vw_txt(filtered, output_crs,
                                       ansatz_method=ansatz_method,
-                                      ansatz_ratio=ansatz_ratio)
+                                      ansatz_ratio=ansatz_ratio,
+                                      lang=vw_lang)
             st.text_area("Preview (first 10 lines)", "\n".join(vw_txt.split("\n")[:11]), height=300)
 
             dl_txt, dl_xlsx = st.columns(2)
@@ -329,7 +347,8 @@ with mode_wfs:
             with dl_xlsx:
                 vw_xlsx = trees_to_vw_xlsx(filtered, output_crs,
                                            ansatz_method=ansatz_method,
-                                           ansatz_ratio=ansatz_ratio)
+                                           ansatz_ratio=ansatz_ratio,
+                                           lang=vw_lang)
                 st.download_button(
                     label="Download XLSX",
                     data=vw_xlsx,
@@ -502,7 +521,8 @@ with mode_pdf:
 
                 vw_txt = pdf_trees_to_vw_txt(merged_gdf, output_crs,
                                              ansatz_method=ansatz_method,
-                                             ansatz_ratio=ansatz_ratio)
+                                             ansatz_ratio=ansatz_ratio,
+                                             lang=vw_lang)
                 st.text_area(
                     "Preview (first 10 lines)",
                     "\n".join(vw_txt.split("\n")[:11]),
@@ -510,7 +530,7 @@ with mode_pdf:
                     key="pdf_preview",
                 )
 
-                dl_txt, dl_xlsx = st.columns(2)
+                dl_txt, dl_xlsx, dl_script = st.columns(3)
                 with dl_txt:
                     st.download_button(
                         label="Download TXT",
@@ -522,7 +542,8 @@ with mode_pdf:
                 with dl_xlsx:
                     vw_xlsx = pdf_trees_to_vw_xlsx(merged_gdf, output_crs,
                                                    ansatz_method=ansatz_method,
-                                                   ansatz_ratio=ansatz_ratio)
+                                                   ansatz_ratio=ansatz_ratio,
+                                                   lang=vw_lang)
                     st.download_button(
                         label="Download XLSX",
                         data=vw_xlsx,
@@ -530,6 +551,20 @@ with mode_pdf:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="pdf_xlsx_download",
                     )
+                with dl_script:
+                    fixup_script = generate_fixup_script(
+                        merged_gdf, output_crs,
+                        lang=vw_lang, ansatz_method=ansatz_method,
+                        ansatz_ratio=ansatz_ratio)
+                    if fixup_script:
+                        st.download_button(
+                            label="VW Fix-up Script (.py)",
+                            data=fixup_script.encode("utf-8"),
+                            file_name="fixup_trees.py",
+                            mime="text/x-python",
+                            key="pdf_script_download",
+                            help="Run in VW Script Editor after import — sets ALL fields by coordinate matching",
+                        )
 
 
 # ============================================================================
@@ -836,11 +871,12 @@ with mode_join:
 
             # Also offer VW TXT/XLSX export (with coordinates + action)
             result_4326_export = result.to_crs("EPSG:4326")
-            dl_txt, dl_xlsx = st.columns(2)
+            dl_txt, dl_xlsx, dl_script = st.columns(3)
             with dl_txt:
                 vw_txt = trees_to_vw_txt(result_4326_export, output_crs,
                                           ansatz_method=ansatz_method,
-                                          ansatz_ratio=ansatz_ratio)
+                                          ansatz_ratio=ansatz_ratio,
+                                          lang=vw_lang)
                 st.download_button(
                     label="Download VW TXT",
                     data=vw_txt.encode("utf-8"),
@@ -851,11 +887,193 @@ with mode_join:
             with dl_xlsx:
                 vw_xlsx = trees_to_vw_xlsx(result_4326_export, output_crs,
                                             ansatz_method=ansatz_method,
-                                            ansatz_ratio=ansatz_ratio)
+                                            ansatz_ratio=ansatz_ratio,
+                                            lang=vw_lang)
                 st.download_button(
                     label="Download VW XLSX",
                     data=vw_xlsx,
                     file_name="Baumkataster_VW_Import.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="join_xlsx_download",
+                )
+            with dl_script:
+                fixup_script = generate_fixup_script(
+                    result_4326_export, output_crs,
+                    lang=vw_lang, ansatz_method=ansatz_method,
+                    ansatz_ratio=ansatz_ratio)
+                if fixup_script:
+                    st.download_button(
+                        label="VW Fix-up Script (.py)",
+                        data=fixup_script.encode("utf-8"),
+                        file_name="fixup_trees.py",
+                        mime="text/x-python",
+                        key="join_script_download",
+                        help="Run in VW Script Editor after import — sets ALL fields by coordinate matching",
+                    )
+
+
+# ============================================================================
+# MODE 4: Table → VW Import (polygon / non-point SHP with attribute coords)
+# ============================================================================
+with mode_table:
+    st.header("Table → VW Import")
+    st.caption(
+        "Upload a shapefile exported from VectorWorks (polygon circles, etc.) where "
+        "the **attribute table** contains the coordinates and tree dimensions — "
+        "geometry type doesn't matter, only the table data is used."
+    )
+
+    tbl_files = st.file_uploader(
+        "Upload shapefile (.shp/.shx/.dbf/.prj or .zip)",
+        type=["shp", "shx", "dbf", "prj", "cpg", "zip"],
+        accept_multiple_files=True,
+        key="tbl_shp_upload",
+    )
+
+    tbl_gdf = None
+    if tbl_files:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            for uf in tbl_files:
+                if uf.name.endswith(".zip"):
+                    with zipfile.ZipFile(io.BytesIO(uf.read())) as zf:
+                        zf.extractall(tmppath)
+                else:
+                    (tmppath / uf.name).write_bytes(uf.read())
+
+            found_shp = list(tmppath.glob("**/*.shp"))
+            if found_shp:
+                tbl_gdf = gpd.read_file(found_shp[0])
+                st.session_state["tbl_gdf"] = tbl_gdf
+                st.success(
+                    f"Loaded **{len(tbl_gdf)} features** — "
+                    f"Geometry: {tbl_gdf.geom_type.iloc[0] if len(tbl_gdf) else '?'}, "
+                    f"Fields: {[c for c in tbl_gdf.columns if c != 'geometry']}"
+                )
+            else:
+                st.error("No .shp file found.")
+
+    tbl_gdf = st.session_state.get("tbl_gdf")
+
+    if tbl_gdf is not None and not tbl_gdf.empty:
+        st.subheader("Attribute Table Preview")
+        st.dataframe(
+            tbl_gdf.drop(columns="geometry", errors="ignore").head(20),
+            use_container_width=True,
+        )
+
+        non_geom = [c for c in tbl_gdf.columns if c != "geometry"]
+
+        st.subheader("Field Mapping")
+        col_map1, col_map2 = st.columns(2)
+
+        with col_map1:
+            x_field = st.selectbox("X coordinate field", non_geom, key="tbl_x_field")
+            y_field = st.selectbox("Y coordinate field", non_geom,
+                                   index=min(1, len(non_geom) - 1), key="tbl_y_field")
+            coord_units = st.selectbox(
+                "Coordinate units in table",
+                ["m (Meters)", "mm (Millimeters)"],
+                index=1,
+                key="tbl_coord_units",
+                help="VectorWorks often exports coordinates in mm when document is set to mm.",
+            )
+            # CRS uses sidebar Input/Output settings (same as other tabs)
+            tbl_input_crs = input_crs_override if input_crs_override else "EPSG:31467"
+            st.info(f"Input CRS: **{tbl_input_crs}** / Output CRS: **{output_crs}** — change in sidebar")
+
+        with col_map2:
+            # Optional field mappings for tree attributes
+            none_opt = ["(none)"] + non_geom
+            d_field = st.selectbox("Kronendurchmesser (D) field", none_opt, key="tbl_d_field")
+            id_field = st.selectbox("Baum-ID field", none_opt, key="tbl_id_field")
+            hoehe_field = st.selectbox("Baumhöhe field", none_opt, key="tbl_h_field")
+            stu_field = st.selectbox("Stammumfang field", none_opt, key="tbl_stu_field")
+
+        if st.button("Build VW Import", key="tbl_build_btn"):
+            with st.spinner("Building..."):
+                from shapely.geometry import Point as ShapelyPoint
+
+                divisor = 1000.0 if "mm" in coord_units else 1.0
+
+                rows_out = []
+                for _, row in tbl_gdf.iterrows():
+                    try:
+                        rx = float(row[x_field]) / divisor
+                        ry = float(row[y_field]) / divisor
+                    except (TypeError, ValueError):
+                        continue
+
+                    tree_data = {
+                        "geometry": ShapelyPoint(rx, ry),
+                    }
+                    if d_field != "(none)":
+                        tree_data["kronendurchmesser"] = row.get(d_field, "")
+                    if id_field != "(none)":
+                        tree_data["baum_id"] = row.get(id_field, "")
+                    if hoehe_field != "(none)":
+                        tree_data["baumhoehe"] = row.get(hoehe_field, "")
+                    if stu_field != "(none)":
+                        tree_data["stammumfang"] = row.get(stu_field, "")
+
+                    rows_out.append(tree_data)
+
+                if not rows_out:
+                    st.error("No valid rows — check your X/Y field mapping.")
+                else:
+                    result_gdf = gpd.GeoDataFrame(rows_out, crs=resolve_crs(tbl_input_crs))
+                    result_4326 = result_gdf.to_crs("EPSG:4326")
+                    st.session_state["tbl_result"] = result_4326
+                    st.success(f"**{len(result_4326)} trees** ready for export")
+
+        if "tbl_result" in st.session_state:
+            result_4326 = st.session_state["tbl_result"]
+
+            # Preview table
+            preview = result_4326.drop(columns="geometry", errors="ignore")
+            st.dataframe(preview, use_container_width=True)
+
+            # Map
+            centroid = result_4326.union_all().centroid
+            m_tbl = folium.Map(location=[centroid.y, centroid.x], zoom_start=17)
+            for _, tree in result_4326.iterrows():
+                bid = tree.get("baum_id", "")
+                kd = tree.get("kronendurchmesser", "")
+                popup = f"<b>{bid}</b><br>KD: {kd}"
+                folium.CircleMarker(
+                    location=[tree.geometry.y, tree.geometry.x],
+                    radius=5, color="green", fill=True,
+                    fill_color="green", fill_opacity=0.7,
+                    popup=folium.Popup(popup, max_width=200),
+                ).add_to(m_tbl)
+            st_folium(m_tbl, width=700, height=500, key="tbl_map")
+
+            # Export
+            st.header("Export VectorWorks Import")
+            st.caption(f"Output CRS: **{output_crs}** — {CRS_OPTIONS[output_crs]}")
+
+            dl_txt, dl_xlsx = st.columns(2)
+            with dl_txt:
+                vw_txt = trees_to_vw_txt(result_4326, output_crs,
+                                          ansatz_method=ansatz_method,
+                                          ansatz_ratio=ansatz_ratio,
+                                          lang=vw_lang)
+                st.download_button(
+                    label="Download TXT",
+                    data=vw_txt.encode("utf-8"),
+                    file_name="Baumkataster_VW_Import.txt",
+                    mime="text/plain",
+                    key="tbl_txt_download",
+                )
+            with dl_xlsx:
+                vw_xlsx = trees_to_vw_xlsx(result_4326, output_crs,
+                                            ansatz_method=ansatz_method,
+                                            ansatz_ratio=ansatz_ratio,
+                                            lang=vw_lang)
+                st.download_button(
+                    label="Download XLSX",
+                    data=vw_xlsx,
+                    file_name="Baumkataster_VW_Import.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="tbl_xlsx_download",
                 )
