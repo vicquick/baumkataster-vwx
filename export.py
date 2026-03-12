@@ -74,6 +74,104 @@ def estimate_stammumfang(kronendurchmesser):
     return round(kd * 18 + 20)
 
 
+# Species-specific Astansatzhöhe ratios for open-grown / solitary trees.
+# Based on forestry literature (LWF Bayern, Pretzsch et al.) and typical
+# crown architecture of landscape trees in Central Europe.
+# Key: lowercased botanical name prefix → ratio of crown base height to total height.
+# Looked up by longest-prefix match on the botanical name.
+SPECIES_ANSATZ_RATIOS: dict[str, tuple[float, str]] = {
+    # Conifers — keep branches very low as solitaires
+    "picea":                    (0.10, "Fichte — beastet fast bis zum Boden"),
+    "abies":                    (0.10, "Tanne — sehr tief beastet"),
+    "tsuga":                    (0.10, "Hemlocktanne — tief beastet"),
+    "taxus":                    (0.10, "Eibe — tief beastet"),
+    "pseudotsuga":              (0.15, "Douglasie — etwas höher als Fichte"),
+    "larix":                    (0.30, "Lärche — Lichtbaumart, lichter Wuchs"),
+    "pinus sylvestris":         (0.40, "Waldkiefer — hoher Kronenansatz"),
+    "pinus":                    (0.35, "Kiefer — generell hoch ansetzend"),
+    # Broadleaf — low crown base (deep, wide crowns)
+    "fagus":                    (0.15, "Buche — extrem breite Solitärkrone"),
+    "quercus":                  (0.20, "Eiche — breitkronig, kurzer Stamm"),
+    "carpinus":                 (0.20, "Hainbuche — niedrig ansetzende Krone"),
+    "acer campestre":           (0.20, "Feldahorn — bekannt niedriger Ansatz"),
+    "tilia":                    (0.20, "Linde — tief ansetzende breite Krone"),
+    "aesculus":                 (0.20, "Kastanie — tief geschlossene Krone"),
+    "juglans":                  (0.25, "Walnuss — breite Krone, mittlerer Ansatz"),
+    "corylus":                  (0.25, "Hasel — mittlerer Ansatz"),
+    "acer platanoides":         (0.30, "Spitzahorn — etwas höherer Ansatz"),
+    "acer pseudoplatanus":      (0.30, "Bergahorn — ähnlich Spitzahorn"),
+    "acer":                     (0.25, "Ahorn — mittel"),
+    # Broadleaf — medium crown base
+    "prunus avium":             (0.30, "Vogelkirsche — relativ hoher Ansatz"),
+    "prunus padus":             (0.25, "Traubenkirsche — etwas tiefer"),
+    "prunus serrulata":         (0.25, "Zierkirsche — mittel"),
+    "prunus":                   (0.25, "Prunus — mittel"),
+    "malus":                    (0.25, "Apfel — Obstbaum-typisch"),
+    "pyrus":                    (0.30, "Birne — etwas höher als Apfel"),
+    "sorbus":                   (0.30, "Eberesche/Mehlbeere — lockere hohe Krone"),
+    "alnus":                    (0.30, "Erle — Lichtbaumart"),
+    "salix alba":               (0.25, "Silberweide — breite Krone, mittlerer Ansatz"),
+    "salix caprea":             (0.20, "Salweide — eher strauchig"),
+    "salix":                    (0.25, "Weide — mittel"),
+    # Broadleaf — high crown base (light-demanding)
+    "betula":                   (0.35, "Birke — Lichtbaumart, selbstausästend"),
+    "fraxinus":                 (0.35, "Esche — Lichtbaumart, hoher Ansatz"),
+    "populus nigra italica":    (0.08, "Säulenpappel — Äste fast vom Boden"),
+    "populus nigra 'italica'":  (0.08, "Säulenpappel — Äste fast vom Boden"),
+    "populus tremula":          (0.35, "Zitterpappel — schlank, hoher Ansatz"),
+    "populus":                  (0.30, "Pappel — generell mittel-hoch"),
+    "robinia":                  (0.35, "Robinie — Lichtbaumart"),
+    "platanus":                 (0.30, "Platane — mittlerer Ansatz"),
+    "ulmus":                    (0.25, "Ulme — breite Krone"),
+    # Shrubby species — very low
+    "crataegus":                (0.15, "Weißdorn — strauchig, tief beastet"),
+    "sambucus":                 (0.15, "Holunder — strauchig"),
+    "prunus spinosa":           (0.15, "Schlehe — Strauch"),
+    "cornus":                   (0.15, "Hartriegel — strauchig"),
+    "euonymus":                 (0.15, "Pfaffenhütchen — strauchig"),
+    "viburnum":                 (0.15, "Schneeball — strauchig"),
+    "ilex":                     (0.10, "Stechpalme — tief beastet"),
+}
+
+# Default fallback when species not found
+DEFAULT_ANSATZ_RATIO = 0.25
+
+
+def lookup_species_ratio(botanical_name: str) -> tuple[float, str]:
+    """Find the best matching Astansatzhöhe ratio for a botanical name.
+
+    Uses longest-prefix match so 'Populus nigra italica' matches before 'Populus'.
+    Returns (ratio, description) or (DEFAULT_ANSATZ_RATIO, "Standard") if not found.
+    """
+    if not botanical_name:
+        return DEFAULT_ANSATZ_RATIO, "Kein Name — Standardwert"
+    name = botanical_name.strip().lower()
+    # Try longest prefix first
+    best_key = ""
+    best_val = (DEFAULT_ANSATZ_RATIO, "Nicht zugeordnet — Standardwert")
+    for key, val in SPECIES_ANSATZ_RATIOS.items():
+        if name.startswith(key) and len(key) > len(best_key):
+            best_key = key
+            best_val = val
+    return best_val
+
+
+def build_species_ratio_table(trees_gdf) -> dict[str, tuple[float, str]]:
+    """Extract unique species from a GeoDataFrame and return recommended ratios.
+
+    Returns {botanical_name: (ratio, description)} for each unique species found.
+    """
+    table = {}
+    for _, row in trees_gdf.iterrows():
+        name = row.get("art_latein") or row.get("gattung_latein") or ""
+        name = str(name).strip() if name else ""
+        if not name or name in ("nan", "None"):
+            continue
+        if name not in table:
+            table[name] = lookup_species_ratio(name)
+    return dict(sorted(table.items()))
+
+
 def estimate_ansatzhoehe(hoehe, kronendurchmesser, method="ratio", ratio=0.25):
     """Estimate Ansatzhöhe (crown base height) from tree height and crown diameter.
 
@@ -416,8 +514,22 @@ def _export_vw_xlsx(all_rows: list[list], lang="en") -> bytes:
     return buf.getvalue()
 
 
+def _resolve_ansatz_ratio(row, ansatz_method, ansatz_ratio, species_ratios):
+    """Determine the Ansatzhöhe ratio for a single tree row.
+
+    For method="species", looks up the ratio from species_ratios dict
+    (keyed by botanical name), falling back to DEFAULT_ANSATZ_RATIO.
+    """
+    if ansatz_method == "species" and species_ratios is not None:
+        name = str(row.get("art_latein") or row.get("gattung_latein") or "").strip()
+        if name and name not in ("nan", "None") and name in species_ratios:
+            return species_ratios[name]
+        return lookup_species_ratio(name)[0]
+    return ansatz_ratio
+
+
 def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
-                    lang="en", estimate_from_kd=False):
+                    lang="en", estimate_from_kd=False, species_ratios=None):
     """Build VW row data from WFS/REST GeoDataFrame."""
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
     all_rows = []
@@ -441,7 +553,9 @@ def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_rati
         if ansatz_method == "none":
             ansatzhoehe = row.get("ansatzhoehe", "") if hasattr(row, "get") else row.get("ansatzhoehe", "")
         else:
-            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=ansatz_method, ratio=ansatz_ratio)
+            ratio = _resolve_ansatz_ratio(row, ansatz_method, ansatz_ratio, species_ratios)
+            method = "ratio" if ansatz_method == "species" else ansatz_method
+            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=method, ratio=ratio)
         strasse = row.get("strasse", "")
         hausnr = row.get("hausnummer", "")
         standort = f"{strasse} {hausnr}".strip() if strasse else ""
@@ -449,7 +563,8 @@ def _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_rati
     return all_rows
 
 
-def _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25, lang="en"):
+def _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
+                    lang="en", species_ratios=None):
     """Build VW row data from PDF-merged GeoDataFrame."""
     transformer = Transformer.from_crs("EPSG:4326", resolve_crs(output_crs_key), always_xy=True)
     all_rows = []
@@ -459,7 +574,9 @@ def _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_rati
         if not _fmt(ansatzhoehe) and ansatz_method != "none":
             hoehe = row.get("baumhoehe", "")
             kd = row.get("kronendurchmesser", "")
-            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=ansatz_method, ratio=ansatz_ratio)
+            ratio = _resolve_ansatz_ratio(row, ansatz_method, ansatz_ratio, species_ratios)
+            method = "ratio" if ansatz_method == "species" else ansatz_method
+            ansatzhoehe = estimate_ansatzhoehe(hoehe, kd, method=method, ratio=ratio)
         standort = row.get("standort", "")
         all_rows.append(_build_vw_row(row, x, y, ansatzhoehe=ansatzhoehe, standort=standort, lang=lang))
     return all_rows
@@ -468,39 +585,46 @@ def _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method="none", ansatz_rati
 # --- TXT exports ---
 
 def trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
-                    lang="en", estimate_from_kd=False):
+                    lang="en", estimate_from_kd=False, species_ratios=None):
     """WFS/REST pipeline → VW import TXT."""
     rows = _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio,
-                           lang=lang, estimate_from_kd=estimate_from_kd)
+                           lang=lang, estimate_from_kd=estimate_from_kd,
+                           species_ratios=species_ratios)
     return _export_vw_txt(rows, lang=lang)
 
 
-def pdf_trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25, lang="en"):
+def pdf_trees_to_vw_txt(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
+                        lang="en", species_ratios=None):
     """PDF pipeline → VW import TXT."""
-    rows = _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio, lang=lang)
+    rows = _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio,
+                           lang=lang, species_ratios=species_ratios)
     return _export_vw_txt(rows, lang=lang)
 
 
 # --- XLSX exports ---
 
 def trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
-                     lang="en", estimate_from_kd=False):
+                     lang="en", estimate_from_kd=False, species_ratios=None):
     """WFS/REST pipeline → VW import XLSX."""
     rows = _build_wfs_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio,
-                           lang=lang, estimate_from_kd=estimate_from_kd)
+                           lang=lang, estimate_from_kd=estimate_from_kd,
+                           species_ratios=species_ratios)
     return _export_vw_xlsx(rows, lang=lang)
 
 
-def pdf_trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25, lang="en"):
+def pdf_trees_to_vw_xlsx(trees_gdf, output_crs_key, ansatz_method="none", ansatz_ratio=0.25,
+                         lang="en", species_ratios=None):
     """PDF pipeline → VW import XLSX."""
-    rows = _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio, lang=lang)
+    rows = _build_pdf_rows(trees_gdf, output_crs_key, ansatz_method, ansatz_ratio,
+                           lang=lang, species_ratios=species_ratios)
     return _export_vw_xlsx(rows, lang=lang)
 
 
 # --- VW Python script workaround for import bugs ---
 
 def generate_fixup_script(trees_gdf, output_crs_key, lang="en",
-                          ansatz_method="none", ansatz_ratio=0.25):
+                          ansatz_method="none", ansatz_ratio=0.25,
+                          species_ratios=None):
     """Generate a VW Python script to batch-set ALL fields on Existing Tree objects.
 
     Works around VW import bugs where fields don't populate correctly.
@@ -536,8 +660,10 @@ def generate_fixup_script(trees_gdf, output_crs_key, lang="en",
 
         ansatzhoehe = _fmt(row.get("ansatzhoehe", ""))
         if not ansatzhoehe and ansatz_method != "none":
+            ratio = _resolve_ansatz_ratio(row, ansatz_method, ansatz_ratio, species_ratios)
+            method = "ratio" if ansatz_method == "species" else ansatz_method
             est = estimate_ansatzhoehe(baumhoehe, kronendurchmesser,
-                                       method=ansatz_method, ratio=ansatz_ratio)
+                                       method=method, ratio=ratio)
             ansatzhoehe = str(est) if est != "" else ""
 
         tree_entries.append({

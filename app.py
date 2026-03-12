@@ -17,6 +17,8 @@ from export import (
     trees_to_vw_xlsx, pdf_trees_to_vw_xlsx,
     generate_fixup_script,
     estimate_baumhoehe, estimate_stammumfang, estimate_ansatzhoehe,
+    build_species_ratio_table, lookup_species_ratio,
+    DEFAULT_ANSATZ_RATIO, SPECIES_ANSATZ_RATIOS,
 )
 from fetcher import (
     discover_fields,
@@ -75,17 +77,75 @@ estimate_from_kd = st.sidebar.checkbox(
 )
 ansatz_method = st.sidebar.selectbox(
     "Ansatzhöhe estimation",
-    ["none", "ratio", "kd"],
+    ["none", "ratio", "species", "kd"],
     format_func=lambda x: {
         "none": "Leave empty",
-        "ratio": "Höhe × Ratio (recommended)",
+        "ratio": "Höhe × fixed Ratio",
+        "species": "Artspezifisch (recommended)",
         "kd": "Höhe − Kronendurchmesser",
     }[x],
-    index=1,
+    index=2,
 )
 ansatz_ratio = 0.25
 if ansatz_method == "ratio":
     ansatz_ratio = st.sidebar.slider("Ratio (Ansatzhöhe / Höhe)", 0.10, 0.50, 0.25, 0.05)
+if ansatz_method == "species":
+    st.sidebar.caption(
+        "Artspezifische Ratios werden automatisch aus den erkannten Baumarten "
+        "ermittelt. Du kannst die Werte im Hauptbereich anpassen, sobald Daten geladen sind."
+    )
+
+def render_species_ratio_editor(trees_gdf, session_key="species_ratios"):
+    """Show detected species with recommended ratios and let user edit them.
+
+    Returns a dict {botanical_name: ratio} for use in export functions,
+    or None if ansatz_method != "species".
+    """
+    if ansatz_method != "species":
+        return None
+
+    recommended = build_species_ratio_table(trees_gdf)
+    if not recommended:
+        st.info("Keine Baumarten (Botanischer Name) in den Daten gefunden.")
+        return None
+
+    st.subheader("Artspezifische Astansatzhöhe")
+    st.caption(
+        "Erkannte Baumarten und empfohlene Ratios (Astansatzhöhe / Höhe). "
+        "Werte basieren auf typischer Kronenarchitektur freistehender Bäume. "
+        "Du kannst jeden Wert individuell anpassen."
+    )
+
+    # Build editable dataframe
+    editor_data = []
+    for name, (ratio, desc) in recommended.items():
+        editor_data.append({
+            "Botanischer Name": name,
+            "Ratio": ratio,
+            "Begründung": desc,
+        })
+
+    edited_df = st.data_editor(
+        pd.DataFrame(editor_data),
+        column_config={
+            "Botanischer Name": st.column_config.TextColumn(disabled=True),
+            "Ratio": st.column_config.NumberColumn(
+                min_value=0.05, max_value=0.60, step=0.05, format="%.2f",
+            ),
+            "Begründung": st.column_config.TextColumn(disabled=True),
+        },
+        use_container_width=True,
+        hide_index=True,
+        key=f"species_editor_{session_key}",
+    )
+
+    # Build the species_ratios dict from edited values
+    species_ratios = {}
+    for _, erow in edited_df.iterrows():
+        species_ratios[erow["Botanischer Name"]] = float(erow["Ratio"])
+
+    return species_ratios
+
 
 # ============================================================================
 # TOP-LEVEL TABS
@@ -334,13 +394,17 @@ with mode_wfs:
 
             st_folium(m2, width=700, height=500, key="trees_map")
 
+            # Species ratio editor (between results and export)
+            wfs_species_ratios = render_species_ratio_editor(filtered, session_key="wfs")
+
             st.header("4. Export VectorWorks Import TXT")
             st.caption(f"Output coordinates in: **{output_crs}** — {CRS_OPTIONS[output_crs]}")
 
             vw_txt = trees_to_vw_txt(filtered, output_crs,
                                       ansatz_method=ansatz_method,
                                       ansatz_ratio=ansatz_ratio,
-                                      lang=vw_lang)
+                                      lang=vw_lang,
+                                      species_ratios=wfs_species_ratios)
             st.text_area("Preview (first 10 lines)", "\n".join(vw_txt.split("\n")[:11]), height=300)
 
             dl_txt, dl_xlsx = st.columns(2)
@@ -355,7 +419,8 @@ with mode_wfs:
                 vw_xlsx = trees_to_vw_xlsx(filtered, output_crs,
                                            ansatz_method=ansatz_method,
                                            ansatz_ratio=ansatz_ratio,
-                                           lang=vw_lang)
+                                           lang=vw_lang,
+                                           species_ratios=wfs_species_ratios)
                 st.download_button(
                     label="Download XLSX",
                     data=vw_xlsx,
@@ -522,6 +587,9 @@ with mode_pdf:
                     ).add_to(m3)
                 st_folium(m3, width=700, height=500, key="pdf_trees_map")
 
+                # Species ratio editor
+                pdf_species_ratios = render_species_ratio_editor(merged_gdf, session_key="pdf")
+
                 # Export
                 st.header("4. Export VectorWorks Import")
                 st.caption(f"Output CRS: **{output_crs}** — {CRS_OPTIONS[output_crs]}")
@@ -529,7 +597,8 @@ with mode_pdf:
                 vw_txt = pdf_trees_to_vw_txt(merged_gdf, output_crs,
                                              ansatz_method=ansatz_method,
                                              ansatz_ratio=ansatz_ratio,
-                                             lang=vw_lang)
+                                             lang=vw_lang,
+                                             species_ratios=pdf_species_ratios)
                 st.text_area(
                     "Preview (first 10 lines)",
                     "\n".join(vw_txt.split("\n")[:11]),
@@ -550,7 +619,8 @@ with mode_pdf:
                     vw_xlsx = pdf_trees_to_vw_xlsx(merged_gdf, output_crs,
                                                    ansatz_method=ansatz_method,
                                                    ansatz_ratio=ansatz_ratio,
-                                                   lang=vw_lang)
+                                                   lang=vw_lang,
+                                                   species_ratios=pdf_species_ratios)
                     st.download_button(
                         label="Download XLSX",
                         data=vw_xlsx,
@@ -562,7 +632,8 @@ with mode_pdf:
                     fixup_script = generate_fixup_script(
                         merged_gdf, output_crs,
                         lang=vw_lang, ansatz_method=ansatz_method,
-                        ansatz_ratio=ansatz_ratio)
+                        ansatz_ratio=ansatz_ratio,
+                        species_ratios=pdf_species_ratios)
                     if fixup_script:
                         st.download_button(
                             label="VW Fix-up Script (.py)",
@@ -878,12 +949,17 @@ with mode_join:
 
             # Also offer VW TXT/XLSX export (with coordinates + action)
             result_4326_export = result.to_crs("EPSG:4326")
+
+            # Species ratio editor
+            join_species_ratios = render_species_ratio_editor(result_4326_export, session_key="join")
+
             dl_txt, dl_xlsx, dl_script = st.columns(3)
             with dl_txt:
                 vw_txt = trees_to_vw_txt(result_4326_export, output_crs,
                                           ansatz_method=ansatz_method,
                                           ansatz_ratio=ansatz_ratio,
-                                          lang=vw_lang)
+                                          lang=vw_lang,
+                                          species_ratios=join_species_ratios)
                 st.download_button(
                     label="Download VW TXT",
                     data=vw_txt.encode("utf-8"),
@@ -895,7 +971,8 @@ with mode_join:
                 vw_xlsx = trees_to_vw_xlsx(result_4326_export, output_crs,
                                             ansatz_method=ansatz_method,
                                             ansatz_ratio=ansatz_ratio,
-                                            lang=vw_lang)
+                                            lang=vw_lang,
+                                            species_ratios=join_species_ratios)
                 st.download_button(
                     label="Download VW XLSX",
                     data=vw_xlsx,
@@ -907,7 +984,8 @@ with mode_join:
                 fixup_script = generate_fixup_script(
                     result_4326_export, output_crs,
                     lang=vw_lang, ansatz_method=ansatz_method,
-                    ansatz_ratio=ansatz_ratio)
+                    ansatz_ratio=ansatz_ratio,
+                    species_ratios=join_species_ratios)
                 if fixup_script:
                     st.download_button(
                         label="VW Fix-up Script (.py)",
@@ -1061,9 +1139,9 @@ with mode_table:
                     elif estimate_from_kd and kd_val:
                         tree_data["stammumfang"] = estimate_stammumfang(kd_val)
 
-                    # Ansatzhöhe: estimate from height
+                    # Ansatzhöhe: estimate from height (species method handled at export time)
                     h_val = tree_data.get("baumhoehe", "")
-                    if ansatz_method != "none" and h_val:
+                    if ansatz_method not in ("none", "species") and h_val:
                         tree_data["ansatzhoehe"] = estimate_ansatzhoehe(
                             h_val, kd_val, method=ansatz_method, ratio=ansatz_ratio)
 
@@ -1112,6 +1190,9 @@ with mode_table:
                 ).add_to(m_tbl)
             st_folium(m_tbl, width=700, height=500, key="tbl_map")
 
+            # Species ratio editor
+            tbl_species_ratios = render_species_ratio_editor(result_4326, session_key="tbl")
+
             # Export
             st.header("Export VectorWorks Import")
             st.caption(f"Output CRS: **{output_crs}** — {CRS_OPTIONS[output_crs]}")
@@ -1122,7 +1203,8 @@ with mode_table:
                                           ansatz_method=ansatz_method,
                                           ansatz_ratio=ansatz_ratio,
                                           lang=vw_lang,
-                                          estimate_from_kd=estimate_from_kd)
+                                          estimate_from_kd=estimate_from_kd,
+                                          species_ratios=tbl_species_ratios)
                 st.download_button(
                     label="Download TXT",
                     data=vw_txt.encode("utf-8"),
@@ -1135,7 +1217,8 @@ with mode_table:
                                             ansatz_method=ansatz_method,
                                             ansatz_ratio=ansatz_ratio,
                                             lang=vw_lang,
-                                            estimate_from_kd=estimate_from_kd)
+                                            estimate_from_kd=estimate_from_kd,
+                                            species_ratios=tbl_species_ratios)
                 st.download_button(
                     label="Download XLSX",
                     data=vw_xlsx,
