@@ -15,6 +15,8 @@ def fetch_trees(preset: dict, bbox_4326: tuple, max_features: int = 10000) -> gp
         gdf = _fetch_arcgis(preset, bbox_4326, max_features)
     elif preset["service_type"] == "3dtiles":
         gdf = _fetch_3dtiles(preset, bbox_4326, max_features)
+    elif preset["service_type"] == "overpass":
+        gdf = _fetch_overpass(preset, bbox_4326, max_features)
     else:
         gdf = _fetch_wfs(preset, bbox_4326, max_features)
 
@@ -185,6 +187,40 @@ def _fetch_arcgis(preset: dict, bbox_4326: tuple, max_features: int) -> gpd.GeoD
         props["geometry"] = geom
         records.append(props)
 
+    return gpd.GeoDataFrame(records, crs="EPSG:4326")
+
+
+def _fetch_overpass(preset: dict, bbox_4326: tuple, max_features: int) -> gpd.GeoDataFrame:
+    """Fetch OSM `natural=tree` nodes via Overpass. bbox_4326 = (minx,miny,maxx,maxy).
+
+    OSM tree tagging is sparse: expect position + presence for ~all, but genus
+    on only ~10% and species near-zero in most German towns. Good for QA /
+    cross-check, weak for attribute enrichment.
+    """
+    overpass_url = preset.get("overpass_url", "https://overpass-api.de/api/interpreter")
+    minx, miny, maxx, maxy = bbox_4326  # lon/lat
+    # Overpass bbox order: south,west,north,east
+    q = (f"[out:json][timeout:90];"
+         f'(node["natural"="tree"]({miny},{minx},{maxy},{maxx}););'
+         f"out body {max_features};")
+    headers = {"User-Agent": "baumkataster-vwx/1.0 (tree import tool)"}
+    resp = requests.post(overpass_url, data={"data": q}, headers=headers, timeout=120)
+    resp.raise_for_status()
+    elements = resp.json().get("elements", [])
+    if not elements:
+        return gpd.GeoDataFrame()
+
+    records = []
+    for el in elements:
+        if "lon" not in el or "lat" not in el:
+            continue
+        props = dict(el.get("tags", {}))
+        props["osm_id"] = el["id"]
+        props["geometry"] = Point(el["lon"], el["lat"])
+        records.append(props)
+
+    if not records:
+        return gpd.GeoDataFrame()
     return gpd.GeoDataFrame(records, crs="EPSG:4326")
 
 
