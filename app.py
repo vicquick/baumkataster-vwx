@@ -336,7 +336,20 @@ with mode_wfs:
                         st.warning("No trees found in this area.")
                     else:
                         total_bbox = len(trees_gdf)
-                        st.info(f"Fetched {total_bbox} trees in bounding box")
+
+                        # Deduplicate: WFS servers sometimes return duplicate records
+                        before_dedup = len(trees_gdf)
+                        if "baum_id" in trees_gdf.columns:
+                            trees_gdf = trees_gdf.drop_duplicates(subset=["baum_id"], keep="first")
+                        else:
+                            trees_gdf = trees_gdf[
+                                ~trees_gdf.geometry.apply(lambda g: (g.x, g.y)).duplicated(keep="first")
+                            ]
+                        n_dupes = before_dedup - len(trees_gdf)
+                        if n_dupes > 0:
+                            st.info(f"Fetched {total_bbox} trees in bounding box ({n_dupes} duplicates removed)")
+                        else:
+                            st.info(f"Fetched {total_bbox} trees in bounding box")
 
                         boundary_union = boundary_gdf.union_all()
                         mask = trees_gdf.within(boundary_union)
