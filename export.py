@@ -759,6 +759,16 @@ def fix_tree(h):
         if val:
             vs.SetRField(h, rec_name, fname, str(val))
 
+    # Canopy: the VW2026 "Existing Tree" plug-in (and the Baumkataster style)
+    # defaults to "Unregelmäßige Baumkrone" (__CustomCanopy = True), which draws
+    # the crown from the per-direction radii (N/E/S/W = 2.5 m default) and IGNORES
+    # the Kronendurchmesser/Canopy field. Turn it OFF so the round "Canopy" value
+    # drives the crown in 2D + generated 3D. (Calliper/Height/Ansatz already work.)
+    try:
+        vs.SetRField(h, rec_name, "__CustomCanopy", "0")
+    except Exception:
+        pass
+
     # Tree No: VW computes it from IDPrefix + IDLabel + IDSuffix.
     # Setting "Tree No" directly gets overridden by the PIO on reset.
     # Set the component fields that the PIO uses to build Tree No.
